@@ -48,7 +48,12 @@ class WarpWorldType(IntEnum):
     CELESTIAL_WORLD = 1
     PLAYER_WORLD = 2
     UNIQUE_WORLD = 3
-    MISSION_WORLD = 4
+
+
+class SpawnTargetType(IntEnum):
+    ENTITY = 1
+    COORDINATES = 2
+    ASTEROID = 3
 
 
 class WarpAliasType(IntEnum):

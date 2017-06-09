@@ -13,7 +13,7 @@ import packets
 from base_plugin import SimpleCommandPlugin
 from data_parser import PlayerWarp
 from pparser import build_packet
-from utilities import Command, send_message
+from utilities import Command, send_message, WarpType, WarpWorldType
 
 
 class WarpPlugin(SimpleCommandPlugin):
@@ -37,8 +37,9 @@ class WarpPlugin(SimpleCommandPlugin):
         :param to_player: Player: The player being warped to.
         :return: None
         """
-        wp = PlayerWarp.build(dict(warp_action=dict(warp_type=2,
-                                                    player_id=to_player.uuid)))
+        wp = PlayerWarp.build(dict(warp_action=dict(
+            warp_type=WarpType.TO_PLAYER,
+            player_id=to_player.uuid)))
         full = build_packet(packets.packets['player_warp'], wp)
         yield from from_player.connection.client_raw_write(full)
 
@@ -49,9 +50,12 @@ class WarpPlugin(SimpleCommandPlugin):
         :param to_player: Player: The player whose ship is being warped to.
         :return: None
         """
-        wp = PlayerWarp.build(dict(warp_action=dict(warp_type=1, world_id=2,
-                                                    ship_id=to_player.uuid,
-                                                    flag=0)))
+        wp = PlayerWarp.build(dict(warp_action=dict(
+            warp_type=WarpType.TO_WORLD,
+            world_id=WarpWorldType.PLAYER_WORLD,
+            ship_id=to_player.uuid,
+            warp_target=0,
+            deploy=0)))
         full = build_packet(packets.packets['player_warp'], wp)
         yield from from_player.connection.client_raw_write(full)
 
