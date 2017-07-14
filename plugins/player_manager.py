@@ -1144,7 +1144,7 @@ class PlayerManager(SessionAccessMixin, SimpleCommandPlugin):
             yield from send_message(conn, "User {} not found.".format(user))
 
         @asyncio.coroutine
-        def _send_does_not_exit(conn, metathing, thing):
+        def _send_does_not_exist(conn, metathing, thing):
             yield from send_message(conn, "{} {} does not exist."
                                     .format(metathing, thing))
 
@@ -1283,7 +1283,7 @@ class PlayerManager(SessionAccessMixin, SimpleCommandPlugin):
                     yield from _send_not_specified(connection, "rank")
                     return
                 if data[2] not in self.server_ranks:
-                    yield from _send_does_not_exit(connection, "Rank", data[2])
+                    yield from _send_does_not_exist(connection, "Rank", data[2])
                     return
                 rank = self.server_ranks[data[2]]
                 if rank["priority"] >= connection.player.priority:
@@ -1313,7 +1313,7 @@ class PlayerManager(SessionAccessMixin, SimpleCommandPlugin):
                     yield from _send_not_specified(connection, "rank")
                     return
                 if data[2] not in self.server_ranks:
-                    yield from _send_does_not_exit(connection, "Rank", data[2])
+                    yield from _send_does_not_exist(connection, "Rank", data[2])
                     return
                 if p.priority >= connection.player.priority:
                     yield from _send_lack_permission(connection)
