@@ -8,7 +8,7 @@ Original authors: AMorporkian
 Updated for release: kharidiron
 """
 
-from base_plugin import SimpleCommandPlugin
+from plugin_manager import SimpleCommandPlugin
 from utilities import get_syntax, Command, send_message
 
 
@@ -44,6 +44,7 @@ class HelpPlugin(SimpleCommandPlugin):
         :param connection: The connection which sent the command.
         :return: Null.
         """
+
         if not data:
             commands = []
             for c, f in self.commands.items():

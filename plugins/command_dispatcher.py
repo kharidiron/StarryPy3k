@@ -12,12 +12,11 @@ Updated for release: kharidiron
 """
 
 import asyncio
-import packets
 
-from base_plugin import BasePlugin
-from utilities import extractor, get_syntax, send_message
 from data_parser import ChatSent
-from pparser import build_packet
+from packet_parser import build_packet, packets
+from plugin_manager import BasePlugin
+from utilities import extractor, get_syntax, send_message
 
 
 class CommandDispatcher(BasePlugin):
@@ -43,6 +42,7 @@ class CommandDispatcher(BasePlugin):
                  a command we know, so that it stops here after it is
                  processed.
         """
+
         if data['parsed']['message'].startswith(
                 self.plugin_config.command_prefix):
             if data['parsed']['message'].startswith("{}sb:".format(
@@ -52,7 +52,7 @@ class CommandDispatcher(BasePlugin):
                 cmd = data['parsed']['message'].replace("sb:", "")
                 pkt = ChatSent.build({"message": cmd, "send_mode": data[
                     'parsed']['send_mode']})
-                full = build_packet(packets.packets['chat_sent'], pkt)
+                full = build_packet(packets['chat_sent'], pkt)
                 yield from connection.client_raw_write(full)
                 return False
             to_parse = data['parsed']['message'][len(
@@ -87,6 +87,7 @@ class CommandDispatcher(BasePlugin):
         :return: Null.
         :raise: NameError on duplicate command name.
         """
+
         self.logger.debug("Adding command with name {}".format(name))
         if aliases is not None:
             for alias in aliases:
@@ -116,6 +117,7 @@ class CommandDispatcher(BasePlugin):
         :param connection: The player connection.
         :return: None.
         """
+
         send_message(connection,
                      "Syntax error: {}".format(error),
                      get_syntax(command,
@@ -131,6 +133,7 @@ class CommandDispatcher(BasePlugin):
         :param connection: The active player connection.
         :return: None
         """
+
         send_message(connection, "Unknown player {}".format(player_name))
         return None
 
@@ -148,6 +151,7 @@ class CommandDispatcher(BasePlugin):
                 could not be found. ValueError when improper input is provided.
                 General Exception error as a last-resort catch-all.
         """
+
         try:
             yield from self.commands[command](extractor(to_parse),
                                               connection)
@@ -157,8 +161,8 @@ class CommandDispatcher(BasePlugin):
             self._send_name_error(e, connection)
         except ValueError as e:
             send_message(connection, str(e))
-        except SystemExit as e:
-            raise SystemExit
+        except KeyboardInterrupt:
+            raise KeyboardInterrupt
         except Exception:
             self.logger.exception("Unknown exception encountered. Ignoring.",
                                   exc_info=True)

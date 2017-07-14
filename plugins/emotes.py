@@ -9,15 +9,14 @@ Original authors: kharidiron
 
 import asyncio
 
-import data_parser
-import packets
-import pparser
-from base_plugin import SimpleCommandPlugin
-from utilities import Command, send_message, StorageMixin, broadcast, \
-    link_plugin_if_available, ChatSendMode
+from data_parser import ChatSent
+from packet_parser import packets, build_packet
+from plugin_manager import SimpleCommandPlugin
+from utilities import (Command, send_message, broadcast,
+                       link_plugin_if_available, ChatSendMode)
 
 
-class Emotes(StorageMixin, SimpleCommandPlugin):
+class Emotes(SimpleCommandPlugin):
     name = "emotes"
     depends = ["command_dispatcher", "player_manager", "chat_manager"]
     set_emotes = {"beckon": "beckons you to come over",
@@ -62,10 +61,9 @@ class Emotes(StorageMixin, SimpleCommandPlugin):
 
     @asyncio.coroutine
     def _send_to_server(self, message, mode, connection):
-        msg_base = data_parser.ChatSent.build(dict(message="".join(message),
-                                                   send_mode=mode))
-        msg_packet = pparser.build_packet(packets.packets['chat_sent'],
-                                          msg_base)
+        msg_base = ChatSent.build(dict(message="".join(message),
+                                       send_mode=mode))
+        msg_packet = build_packet(packets['chat_sent'], msg_base)
         yield from connection.client_raw_write(msg_packet)
 
     # Commands - In-game actions that can be performed
@@ -81,6 +79,7 @@ class Emotes(StorageMixin, SimpleCommandPlugin):
         :param connection: The connection which sent the command.
         :return: Null.
         """
+
         if not data:
             emotes = ", ".join(sorted(self.set_emotes))
             send_message(connection,
@@ -104,11 +103,10 @@ class Emotes(StorageMixin, SimpleCommandPlugin):
                         self.plugins["irc_bot"].bot_write(" -*- {} {}".format(
                             connection.player.alias, emote)))
                 if self.discord_active:
-                    asyncio.ensure_future(self.plugins["discord_bot"]
-                        .bot_write(" -*- {} {}".format(
-                                    connection.player.alias, emote)))
-                message = "^orange;{} {}".format(connection.player.alias,
-                                                 emote)
+                    asyncio.ensure_future(
+                        self.plugins["discord_bot"].bot_write(
+                            " -*- {} {}".format(connection.player.alias, emote)))
+                message = "^orange;{} {}".format(connection.player.alias, emote)
                 try:
                     yield from (
                         self._send_to_server(message,
@@ -129,6 +127,7 @@ class Emotes(StorageMixin, SimpleCommandPlugin):
         :param connection: The connection which sent the command.
         :return: Null.
         """
+
         if not data:
             emotes = ", ".join(sorted(self.set_emotes))
             send_message(connection,
@@ -147,8 +146,7 @@ class Emotes(StorageMixin, SimpleCommandPlugin):
             except KeyError:
                 pass
             finally:
-                message = "^orange;{} {}".format(connection.player.alias,
-                                                 emote)
+                message = "^orange;{} {}".format(connection.player.alias, emote)
                 try:
                     yield from (
                         self._send_to_server(message,

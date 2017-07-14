@@ -3,7 +3,7 @@ import subprocess
 import sys
 import pathlib
 
-from base_plugin import SimpleCommandPlugin
+from plugin_manager import SimpleCommandPlugin
 
 
 class StarboundWatchdog(SimpleCommandPlugin):

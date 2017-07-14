@@ -2,7 +2,7 @@ import tornado.ioloop
 import tornado.web
 from tornado.platform.asyncio import AsyncIOMainLoop
 
-from base_plugin import BasePlugin
+from plugin_manager import BasePlugin
 from utilities import path
 
 

@@ -8,12 +8,12 @@ Permitted accounts are defined in StarryPy3k's configuration file.
 Original Authors: GermaniumSystem
 """
 
-
-from base_plugin import SimpleCommandPlugin
 from data_parser import ConnectFailure
-from pparser import build_packet
-from packets import packets
+from packet_parser import build_packet, packets
+from plugin_manager import SimpleCommandPlugin
 
+
+###
 
 class BasicAuth(SimpleCommandPlugin):
     name = "basic_auth"
@@ -59,7 +59,7 @@ class BasicAuth(SimpleCommandPlugin):
             return True
         uuid = data["parsed"]["uuid"].decode("ascii")
         account = data["parsed"]["account"]
-        player = self.plugins["player_manager"].get_player_by_uuid(uuid)
+        player = self.plugins.player_manager.get_player_by_uuid(uuid)
         # We're only interested in players who already exist.
         if player:
             # The Owner account is quite dangerous, so it has a separate
@@ -105,7 +105,6 @@ class BasicAuth(SimpleCommandPlugin):
         :param reason: String. Reason for rejection.
         :return: Rejection packet.
         """
-        return build_packet(packets["connect_failure"],
-                            ConnectFailure.build(
-                                dict(reason=reason)))
 
+        return build_packet(packets["connect_failure"],
+                            ConnectFailure.build(dict(reason=reason)))

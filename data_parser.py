@@ -6,17 +6,18 @@ import struct
 from collections import OrderedDict
 from io import BytesIO
 try:
+    # noinspection PyUnresolvedReferences
     import c_parser
     use_c_parser = True
 except ImportError:
     use_c_parser = False
 
-from utilities import DotDict, WarpType, WarpWorldType, SpawnTargetType, \
-    SystemLocationType
+from utilities import (DotDict, WarpType, WarpWorldType, SpawnTargetType,
+                       SystemLocationType)
 
 
 #
-## Packet Helpers
+# # Packet Helpers
 #
 
 class NotFound:
@@ -174,13 +175,11 @@ class Struct(metaclass=MetaStruct):
 
 
 class VLQ(Struct):
-    if use_c_parser:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict) -> int:
+    @classmethod
+    def _parse(cls, stream: BytesIO, ctx: OrderedDict) -> int:
+        if use_c_parser:
             return c_parser.parse_vlq(stream)
-    else:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict) -> int:
+        else:
             value = 0
             while True:
                 try:
@@ -212,13 +211,11 @@ class VLQ(Struct):
 
 
 class SignedVLQ(Struct):
-    if use_c_parser:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+    @classmethod
+    def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        if use_c_parser:
             return c_parser.parse_svlq(stream)
-    else:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        else:
             v = VLQ.parse(stream, ctx)
             if (v & 1) == 0x00:
                 return v >> 1
@@ -272,6 +269,7 @@ class SBInt32(Struct):
     def _build(cls, obj, ctx: OrderedDotDict):
         return struct.pack(">l", obj)
 
+
 class UBInt64(Struct):
     @classmethod
     def _parse(cls, stream: BytesIO, ctx: OrderedDict):
@@ -303,13 +301,11 @@ class BFloat32(Struct):
 
 
 class StarByteArray(Struct):
-    if use_c_parser:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+    @classmethod
+    def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        if use_c_parser:
             return c_parser.parse_starbytearray(stream)
-    else:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        else:
             length = VLQ.parse(stream, ctx)
             return stream.read(length)
 
@@ -319,13 +315,11 @@ class StarByteArray(Struct):
 
 
 class StarString(Struct):
-    if use_c_parser:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+    @classmethod
+    def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        if use_c_parser:
             return c_parser.parse_starstring(stream)
-    else:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        else:
             data = StarByteArray.parse(stream, ctx)
             try:
                 return data.decode("utf-8")
@@ -380,25 +374,25 @@ class UUID(Struct):
 
 
 class VariantVariant(Struct):
-    if use_c_parser:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+    @classmethod
+    def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        if use_c_parser:
             return c_parser.parse_variant_variant(stream)
-    else:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        else:
             l = VLQ.parse(stream, ctx)
             return [Variant.parse(stream, ctx) for _ in range(l)]
 
+    @classmethod
+    def _build(cls, obj, ctx: OrderedDotDict):
+        pass
+
 
 class DictVariant(Struct):
-    if use_c_parser:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+    @classmethod
+    def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        if use_c_parser:
             return c_parser.parse_dict_variant(stream)
-    else:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        else:
             l = VLQ.parse(stream, ctx)
             c = {}
             for _ in range(l):
@@ -412,15 +406,17 @@ class DictVariant(Struct):
                 c[key] = value
             return c
 
+    @classmethod
+    def _build(cls, obj, ctx: OrderedDotDict):
+        pass
+
 
 class Variant(Struct):
-    if use_c_parser:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+    @classmethod
+    def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        if use_c_parser:
             return c_parser.parse_variant(stream)
-    else:
-        @classmethod
-        def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        else:
             x = Byte.parse(stream, ctx)
             if x == 1:
                 return None
@@ -436,6 +432,10 @@ class Variant(Struct):
                 return VariantVariant.parse(stream, ctx)
             elif x == 7:
                 return DictVariant.parse(stream, ctx)
+
+    @classmethod
+    def _build(cls, obj, ctx: OrderedDotDict):
+        pass
 
 
 class StringSet(Struct):
@@ -453,6 +453,10 @@ class StringSet(Struct):
             c.append(value)
         return c
 
+    @classmethod
+    def _build(cls, obj, ctx: OrderedDotDict):
+        pass
+
 
 class CelestialCoordinates(Struct):
     @classmethod
@@ -465,7 +469,7 @@ class CelestialCoordinates(Struct):
         return {"x": world_x,
                 "y": world_y,
                 "z": world_z,
-                "planet": world_planet,
+                "orbit": world_planet,
                 "satellite": world_satellite}
 
     @classmethod
@@ -482,27 +486,28 @@ class CelestialCoordinates(Struct):
 class SystemLocation(Struct):
     @classmethod
     def _parse(cls, stream: BytesIO, ctx: OrderedDict):
-        type = Byte.parse(stream, ctx)
-        if type == SystemLocationType.SYSTEM:
-            d = {"type": type}
-        elif type == SystemLocationType.COORDINATE:
+        d = dict()
+        loc_type = Byte.parse(stream, ctx)
+        if loc_type == SystemLocationType.SYSTEM:
+            d["type"] = loc_type
+        elif loc_type == SystemLocationType.COORDINATE:
             d = CelestialCoordinates.parse(stream, ctx)
-            d["type"] = type
-        elif type == SystemLocationType.ORBIT:
+            d["type"] = loc_type
+        elif loc_type == SystemLocationType.ORBIT:
             d = CelestialCoordinates.parse(stream, ctx)
-            d["type"] = type
+            d["type"] = loc_type
             d["direction"] = SBInt32.parse(stream, ctx)
             d["enter_time"] = BDouble.parse(stream, ctx)
             x = BFloat32.parse(stream, ctx)
             y = BFloat32.parse(stream, ctx)
             d["enter_position"] = [x, y]
-        elif type == SystemLocationType.UUID:
-            id = UUID.parse(stream, ctx)
-            d = {"type": type, "uuid": id}
-        elif type == SystemLocationType.LOCATION:
+        elif loc_type == SystemLocationType.UUID:
+            uuid = UUID.parse(stream, ctx)
+            d = {"type": loc_type, "uuid": uuid}
+        elif loc_type == SystemLocationType.LOCATION:
             x = BFloat32.parse(stream, ctx)
             y = BFloat32.parse(stream, ctx)
-            d = {"type": type, "location": [x, y]}
+            d = {"type": loc_type, "location": [x, y]}
         return d
 
     @classmethod
@@ -543,7 +548,7 @@ class WarpAction(Struct):
             elif world_id == WarpWorldType.PLAYER_WORLD:
                 # world_id 2
                 d["ship_id"] = UUID.parse(stream, ctx)
-            elif world_id == WarpWorldType.UNIQUE_WORLD:
+            elif world_id == WarpWorldType.INSTANCE_WORLD:
                 # world_id 3
                 d["world_name"] = StarString.parse(stream, ctx)
                 d["is_instance"] = Byte.parse(stream, ctx)
@@ -584,7 +589,7 @@ class WarpAction(Struct):
                 res += CelestialCoordinates.build(obj["celestial_coordinates"])
             elif obj["world_id"] == WarpWorldType.PLAYER_WORLD:
                 res += UUID.build(binascii.unhexlify(obj["ship_id"]))
-            elif obj["world_id"] == WarpWorldType.UNIQUE_WORLD:
+            elif obj["world_id"] == WarpWorldType.INSTANCE_WORLD:
                 res += StarString.build(obj["world_name"])
                 res += Byte.build(obj["is_instance"])
                 if obj["is_instance"] == 1:
@@ -596,7 +601,7 @@ class WarpAction(Struct):
             res += Byte.build(obj["warp_target"])
             if obj["warp_target"] == SpawnTargetType.ENTITY:
                 res += StarString.build(obj["teleporter"])
-            elif obj["warp_target"] == SpawnTargetType.COORDINATE:
+            elif obj["warp_target"] == SpawnTargetType.COORDINATES:
                 res += UBInt32.build(obj["pos_x"])
                 res += UBInt32.build(obj["pos_y"])
             elif obj["warp_target"] == SpawnTargetType.ASTEROID:
@@ -653,6 +658,10 @@ class ClientContextSet(Struct):
             d[i] = Variant.parse(stream, ctx)
         return d
 
+    @classmethod
+    def _build(cls, obj, ctx: OrderedDotDict):
+        pass
+
 
 class WorldChunks(Struct):
     @classmethod
@@ -673,18 +682,22 @@ class WorldChunks(Struct):
         d['content'] = c
         return d
 
+    @classmethod
+    def _build(cls, obj, ctx: OrderedDotDict):
+        pass
+
 
 class StatusEffectList(Struct):
     @classmethod
     def _parse(cls, stream, ctx=None):
-        len = VLQ.parse(stream, ctx)
+        length = VLQ.parse(stream, ctx)
         res = []
-        for i in range(len):
+        for i in range(length):
             effect = StarString.parse(stream, ctx)
-            type = Byte.parse(stream, ctx)
-            if type == 0:
+            flag_type = Byte.parse(stream, ctx)
+            if flag_type == 0:
                 res.append(effect)
-            elif type == 1:
+            elif flag_type == 1:
                 duration = BFloat32.parse(stream, ctx)
                 res.append({"effect": effect, "duration": duration})
         return res
@@ -692,8 +705,8 @@ class StatusEffectList(Struct):
     @classmethod
     def _build(cls, obj, ctx=None):
         res = b''
-        len = len(obj)
-        res += VLQ.build(len, ctx)
+        length = len(obj)
+        res += VLQ.build(length, ctx)
         for status in obj:
             if isinstance(status, dict):
                 res += StarString.build(status["effect"], ctx)
@@ -703,7 +716,6 @@ class StatusEffectList(Struct):
                 res += StarString.build(status)
                 res += Byte.build(0, ctx)
         return res
-
 
 
 class GreedyArray(Struct):
@@ -728,8 +740,9 @@ class SpawnCoordinates(Struct):
     y = BFloat32
 
 #
-## Packet implementations
+# # Packet implementations
 #
+
 
 class ProtocolRequest(Struct):
     """packet type: 0 """
@@ -915,26 +928,26 @@ class EntityCreate(Struct):
 class DamageRequest(Struct):
     source_id = SBInt32
     target_id = SBInt32
-    hit_type = UBInt32 # This is a DamageHitType
-    damage_type = Byte # This is a DamageType
+    hit_type = UBInt32  # This is a DamageHitType
+    damage_type = Byte  # This is a DamageType
     damage = BFloat32
     knockback_x = BFloat32
     knockback_y = BFloat32
-    junk = SBInt32 # The source ID, again...
+    junk = SBInt32  # The source ID, again...
     damage_source_kind = StarString
     status_effects = StatusEffectList
 
 
 class DamageNotification(Struct):
-    unk_1 = SBInt16 # -4 if source is player, 0 otherwise
-    unk_2 = SBInt16 # Matches source ID if source is monster?
+    unk_1 = SBInt16  # -4 if source is player, 0 otherwise
+    unk_2 = SBInt16  # Matches source ID if source is monster?
     source_id = SignedVLQ
     target_id = SignedVLQ
     target_x = SignedVLQ
     target_y = SignedVLQ
     damage = BFloat32
     health_lost = BFloat32
-    hit_type = UBInt32 # This is a DamageHitType
+    hit_type = UBInt32  # This is a DamageHitType
     damage_source_kind = StarString
     target_material_kind = StarString
 
@@ -943,7 +956,7 @@ class EntityMessage(Struct):
     """packet type: 51"""
     @classmethod
     def _parse(cls, stream, ctx=None):
-        res = {}
+        res = dict()
         res['target_unique'] = Flag.parse(stream, ctx)
         if res['target_unique']:
             res['unique_id'] = StarString.parse(stream, ctx)
@@ -952,10 +965,11 @@ class EntityMessage(Struct):
         res['message_name'] = StarString.parse(stream, ctx)
         res['message_args'] = VariantVariant.parse(stream, ctx)
         res['message_uuid'] = UUID.parse(stream, ctx)
-        res['client_id'] = UBInt16.parse(stream, ctx) # 0 when message is
+        res['client_id'] = UBInt16.parse(stream, ctx)  # 0 when message is
         # sent to or from server, client id of sender when sent to other client
         return res
 
+    @classmethod
     def _build(cls, obj, ctx=None):
         res = b''
         res += Flag.build(obj['target_unique'])
@@ -973,8 +987,8 @@ class EntityMessage(Struct):
 class EntityMessageResponse(Struct):
     @classmethod
     def _parse(cls, stream, ctx=None):
-        res = {}
-        res['success_level'] = Byte.parse(stream, ctx) # 1 is a failure, 2 is a success
+        res = dict()
+        res['success_level'] = Byte.parse(stream, ctx)  # 1=failure, 2=success
         if res['success_level'] == 1:
             res['error'] = StarString.parse(stream, ctx)
         else:
@@ -993,13 +1007,17 @@ class EntityMessageResponse(Struct):
         res += obj['message_uuid']
         return res
 
+
 class StepUpdate(Struct):
     """packet type: 54"""
     heartbeat = VLQ
 
 
-
 class BasePacket(Struct):
+    @classmethod
+    def _parse(cls, stream: BytesIO, ctx: OrderedDict):
+        pass
+
     @classmethod
     def _build(cls, obj, ctx: OrderedDotDict):
         res = b''

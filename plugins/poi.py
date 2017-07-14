@@ -8,17 +8,34 @@ Reimplemented by: medeor413
 """
 
 import asyncio
+import sqlalchemy as sqla
 
-import data_parser
-import pparser
-import packets
-from base_plugin import StorageCommandPlugin
+from data_parser import FlyShip
+from packet_parser import build_packet, packets
+from plugin_manager import SimpleCommandPlugin
+from plugins.storage_manager import (DeclarativeBase, SessionAccessMixin,
+                                     db_session)
 from utilities import Command, send_message, SystemLocationType
 
 
 ###
 
-class POI(StorageCommandPlugin):
+class POI(DeclarativeBase):
+    __tablename__ = "poi"
+
+    id = sqla.Column(sqla.Integer, primary_key=True, autoincrement=True)
+    location = sqla.Column(sqla.String(64))
+    name = sqla.Column(sqla.String(64))
+
+    def __str__(self):
+        return
+
+    def __repr__(self):
+        return ("<POI(name={}, location={})>" 
+                "".format(self.name, self.location))
+
+
+class PointsOfInterest(SessionAccessMixin, SimpleCommandPlugin):
     name = "poi"
     depends = ["command_dispatcher"]
 
@@ -27,41 +44,43 @@ class POI(StorageCommandPlugin):
 
     def activate(self):
         super().activate()
-        if "pois" not in self.storage:
-            self.storage["pois"] = {}
 
     # Helper functions - Used by commands
 
     @asyncio.coroutine
-    def _move_ship(self, connection, location):
+    def _move_ship(self, connection, name):
         """
         Generate packet that moves ship.
 
         :param connection: Player being moved.
-        :param location: The intended destination of the player.
+        :param name: The intended destination of the player.
         :return: Null.
         :raise: NotImplementedError when POI does not exist.
         """
-        if location not in self.storage["pois"]:
-            send_message(connection, "That POI does not exist!")
-            raise NotImplementedError
-        else:
-            location = self.storage["pois"][location]
-            destination = data_parser.FlyShip.build(dict(
-                world_x=location.x,
-                world_y=location.y,
-                world_z=location.z,
+
+        with db_session(self.session) as session:
+            target = session.query(POI).filter_by(name=name).first()
+            if not target:
+                send_message(connection, "That POI does not exist!")
+                raise NotImplementedError
+
+            from plugins.player_manager import Planet
+            location = target.location
+            poi = session.query(Planet).filter_by(location=location).first()
+            destination = FlyShip.build(dict(
+                world_x=poi.x,
+                world_y=poi.y,
+                world_z=poi.z,
                 location=dict(
                     type=SystemLocationType.COORDINATE,
-                    world_x=location.x,
-                    world_y=location.y,
-                    world_z=location.z,
-                    world_planet=location.planet,
-                    world_satellite=location.satellite
+                    world_x=poi.x,
+                    world_y=poi.y,
+                    world_z=poi.z,
+                    world_planet=poi.orbit,
+                    world_satellite=poi.satellite
                 )
             ))
-            flyship_packet = pparser.build_packet(packets.packets["fly_ship"],
-                                                  destination)
+            flyship_packet = build_packet(packets["fly_ship"], destination)
             yield from connection.client_raw_write(flyship_packet)
 
     # Commands - In-game actions that can be performed
@@ -80,25 +99,28 @@ class POI(StorageCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
-        # TODO - Or maybe not - when player already above spawn planet,
-        # nothing happens. It would be nice to generate an alert on this case.
+
         if len(data) == 0:
-            poi_list = (self.storage["pois"].keys())
+            with db_session(self.session) as session:
+                results = session.query(POI).all()
+            poi_list = []
+            for poi in results:
+                poi_list.append(poi.name)
             pois = ", ".join(poi_list)
-            send_message(connection,
-                         "Points of Interest: {}".format(pois))
+            send_message(connection, "Points of Interest: {}".format(pois))
             return
-        planet = connection.player.location
-        poi = " ".join(data).lower()
-        if planet.locationtype() != "ShipWorld" or planet.uuid \
-                != connection.player.uuid:
+        location = connection.player.location
+        name = " ".join(data).lower()
+        if location != "{}'s ship".format(connection.player.alias):
             send_message(connection,
                          "You must be on your ship for this to work.")
             return
         try:
-            yield from self._move_ship(connection, poi)
+            yield from self._move_ship(connection, name)
             send_message(connection,
-                         "Now en route to {}. Please stand by...".format(poi))
+                         "Now en route to {}. Please stand by...".format(name))
+            self.logger.info(
+                "{} flying to poi {}.".format(connection.player.alias, name))
         except NotImplementedError:
             pass
 
@@ -115,23 +137,27 @@ class POI(StorageCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
-        planet = connection.player.location
+
+        location = connection.player.location
         if len(data) == 0:
-            send_message(connection,
-                         "No name for POI specified.")
+            send_message(connection, "No name for POI specified.")
             return
-        poi_name = " ".join(data).lower()
-        if poi_name in self.storage["pois"]:
-            send_message(connection,
-                         "A POI with this name already exists!")
-            return
-        if not str(planet).startswith("CelestialWorld"):
+        if not str(location).startswith("CelestialWorld"):
             send_message(connection,
                          "You must be standing on a planet for this to work.")
             return
-        self.storage["pois"][poi_name] = planet
-        send_message(connection,
-                     "POI {} added to list!".format(poi_name))
+        name = " ".join(data).lower()
+        with db_session(self.session) as session:
+            target = session.query(POI).filter_by(name=name).first()
+            if target:
+                send_message(connection, "A POI with this name already exists!")
+                return
+            poi = POI(name=name, location=location)
+            session.add(poi)
+            session.commit()
+            send_message(connection, "POI {} added to list!".format(name))
+            self.logger.info(
+                "{} added the poi {}.".format(connection.player.alias, name))
 
     @Command("del_poi",
              perm="poi.set_poi",
@@ -145,16 +171,18 @@ class POI(StorageCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
+
         if len(data) == 0:
-            send_message(connection,
-                         "No POI specified.")
+            send_message(connection, "No POI specified.")
             return
-        poi_name = " ".join(data).lower()
-        if poi_name in self.storage["pois"]:
-            self.storage["pois"].pop(poi_name)
-            send_message(connection,
-                         "Deleted POI {}.".format(poi_name))
-        else:
-            send_message(connection,
-                         "That POI does not exist.")
-            return
+        name = " ".join(data).lower()
+        with db_session(self.session) as session:
+            poi = session.query(POI).filter_by(name=name).first()
+            if not poi:
+                send_message(connection, "That POI does not exist.")
+                return
+            session.delete(poi)
+            session.commit()
+            send_message(connection, "Deleted POI {}.".format(name))
+            self.logger.info(
+                "{} deleted the poi {}.".format(connection.player.alias, name))

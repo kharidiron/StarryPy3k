@@ -6,22 +6,21 @@ Plugin for handling most of the most basic (and most useful) commands.
 Original authors: AMorporkian
 Updated for release: kharidiron
 """
+
 import asyncio
-
-import sys
-
 import datetime
 
-import packets
-import pparser
-import data_parser
-from base_plugin import SimpleCommandPlugin
+from data_parser import ConnectFailure, GiveItem
+from packet_parser import packets, build_packet
+from plugin_manager import SimpleCommandPlugin
+from plugins.storage_manager import db_session, SessionAccessMixin
+from server import shutdown
 from utilities import send_message, Command, broadcast
 
 
 ###
 
-class GeneralCommands(SimpleCommandPlugin):
+class GeneralCommands(SessionAccessMixin, SimpleCommandPlugin):
     name = "general_commands"
     depends = ["command_dispatcher", "player_manager"]
     default_config = {"maintenance_message": "This server is currently in "
@@ -33,7 +32,6 @@ class GeneralCommands(SimpleCommandPlugin):
         self.maintenance = False
         self.rejection_message = ""
         self.start_time = None
-    # Helper functions - Used by commands
 
     def activate(self):
         super().activate()
@@ -41,6 +39,22 @@ class GeneralCommands(SimpleCommandPlugin):
         self.rejection_message = self.config.get_plugin_config(self.name)[
             "maintenance_message"]
         self.start_time = datetime.datetime.now()
+
+    # Packet hooks - look for these packets and act on them
+
+    def on_client_connect(self, data, connection):
+        uuid = data["parsed"]["uuid"]
+        player = self.plugins.player_manager.get_player_by_uuid(uuid)
+        if self.maintenance and not player.perm_check(
+                "general_commands.maintenance_bypass"):
+            fail = ConnectFailure.build(dict(reason=self.rejection_message))
+            pkt = build_packet(packets['connect_failure'], fail)
+            yield from connection.raw_write(pkt)
+            return False
+        else:
+            return True
+
+    # Helper functions - Used by commands
 
     def generate_whois(self, target):
         """
@@ -50,39 +64,28 @@ class GeneralCommands(SimpleCommandPlugin):
         :param target: Player object to be looked up.
         :return: String: The data about the player.
         """
+
         logged_in = "(^green;Online^reset;)"
         last_seen = "Now"
         if not target.logged_in:
             logged_in = "(^red;Offline^reset;)"
-            last_seen = target.last_seen
-        return ("Name: {} {}\n"
-                "Raw Name: {}\n"
-                "Ranks: ^yellow;{}^green;\n"
-                "UUID: ^yellow;{}^green;\n"
-                "IP address: ^cyan;{}^green;\n"
-                "Team ID: ^cyan;{}^green;\n"
-                "Current location: ^yellow;{}^green;\n"
-                "Last seen: ^yellow;{}^green;".format(
+            last_seen = target.last_seen.strftime("%Y-%m-%d %H:%M:%S")
+        return ("^orange;Name:^reset; {} {}\n"
+                "^orange;Raw Name:^reset; {}\n"
+                "^orange;Ranks:^reset; {}\n"
+                "^orange;UUID:^reset; {}\n"
+                "^orange;IP address: ^cyan;{}^reset;\n"
+                "^orange;Current location:^reset; {}\n"
+                "^orange;First seen:^reset; {}\n"
+                "^orange;Last seen:^reset; {}".format(
                     target.alias, logged_in,
                     target.name,
-                    ", ".join(target.ranks),
+                    target.ranks,
                     target.uuid,
-                    target.ip,
-                    target.team_id,
+                    target.current_ip,
                     target.location,
+                    target.first_seen.strftime("%Y-%m-%d %H:%M:%S"),
                     last_seen))
-
-    def on_connect_success(self, data, connection):
-        if self.maintenance and not connection.player.perm_check(
-                "general_commands.maintenance_bypass"):
-            fail = data_parser.ConnectFailure.build(dict(
-                reason=self.rejection_message))
-            pkt = pparser.build_packet(packets.packets['connect_failure'],
-                                       fail)
-            yield from connection.raw_write(pkt)
-            return False
-        else:
-            return True
 
     # Commands - In-game actions that can be performed
 
@@ -97,17 +100,17 @@ class GeneralCommands(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
+
         ret_list = []
-        for player in self.plugins['player_manager'].players_online:
-            target = self.plugins['player_manager'].get_player_by_uuid(player)
+        for player in self.plugins.player_manager.players_online():
             if connection.player.perm_check("general_commands.who_clientids"):
                 ret_list.append(
-                    "[^red;{}^reset;] {}{}^reset;".format(target.client_id,
-                                                          target.chat_prefix,
-                                                          target.alias))
+                    "[^red;{}^reset;] {}{}^reset;".format(player.client_id,
+                                                          player.chat_prefix,
+                                                          player.alias))
             else:
-                ret_list.append("{}{}^reset;".format(target.chat_prefix,
-                                                     target.alias))
+                ret_list.append("{}{}^reset;".format(player.chat_prefix,
+                                                     player.alias))
         send_message(connection,
                      "{} players online:\n{}".format(len(ret_list),
                                                      ", ".join(ret_list)))
@@ -125,10 +128,11 @@ class GeneralCommands(SimpleCommandPlugin):
         :return: Null.
         :raise: SyntaxWarning if no name provided.
         """
+
         if len(data) == 0:
             raise SyntaxWarning("No target provided.")
         name = " ".join(data)
-        info = self.plugins['player_manager'].find_player(name)
+        info = self.plugins.player_manager.find_player(name)
         if info is not None:
             send_message(connection, self.generate_whois(info))
         else:
@@ -150,15 +154,16 @@ class GeneralCommands(SimpleCommandPlugin):
                 cannot be properly converted. NameError if a target player
                 cannot be resolved.
         """
+
         arg_count = len(data)
-        target = self.plugins.player_manager.find_player(data[0])
+        player = self.plugins.player_manager.find_player(data[0])
         if arg_count == 1:
-            target = connection.player
+            player = connection.player
             item = data[0]
             count = 1
         elif arg_count == 2:
             if data[1].isdigit():
-                target = connection.player
+                player = connection.player
                 item = data[0]
                 count = int(data[1])
             else:
@@ -172,17 +177,16 @@ class GeneralCommands(SimpleCommandPlugin):
             count = int(data[2])
         else:
             raise SyntaxWarning("Too many arguments")
-        if target is None:
-            raise NameError(target)
-        target = target.connection
+        if player is None:
+            raise NameError(player)
+        target = self.plugins.player_manager.get_connection(connection, player)
         if count > 10000 and item != "money":
             count = 10000
-        item_base = data_parser.GiveItem.build(dict(name=item,
-                                                    count=count,
-                                                    variant_type=7,
-                                                    description=""))
-        item_packet = pparser.build_packet(packets.packets['give_item'],
-                                           item_base)
+        item_base = GiveItem.build(dict(name=item,
+                                        count=count,
+                                        variant_type=7,
+                                        description=""))
+        item_packet = build_packet(packets['give_item'], item_base)
         yield from target.raw_write(item_packet)
         send_message(connection,
                      "Gave {} (count: {}) to {}".format(
@@ -204,6 +208,7 @@ class GeneralCommands(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
+
         if len(data) > 1 and connection.player.perm_check(
                 "general_commands.nick_others"):
             target = self.plugins.player_manager.find_player(data[0])
@@ -216,13 +221,15 @@ class GeneralCommands(SimpleCommandPlugin):
         if self.plugins.player_manager.get_player_by_alias(alias):
             raise ValueError("There's already a user by that name.")
         else:
-            clean_alias = self.plugins['player_manager'].clean_name(alias)
+            clean_alias = self.plugins.player_manager.clean_name(alias)
             if clean_alias is None:
                 send_message(connection,
                              "Nickname contains no valid characters.")
                 return
             old_alias = target.alias
-            target.alias = clean_alias
+            with db_session(self.session) as session:
+                target.alias = clean_alias
+                session.commit()
             broadcast(connection, "{}'s name has been changed to {}".format(
                 old_alias, clean_alias))
 
@@ -237,6 +244,7 @@ class GeneralCommands(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
+
         send_message(connection,
                      self.generate_whois(connection.player))
 
@@ -251,21 +259,20 @@ class GeneralCommands(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
+
         ret_list = []
         location = str(connection.player.location)
-        for uid in self.plugins.player_manager.players_online:
-            p = self.plugins.player_manager.get_player_by_uuid(uid)
-            if str(p.location) == location:
-                if connection.player.perm_check(
-                        "general_commands.who_clientids"):
-                    ret_list.append(
-                        "[^red;{}^reset;] {}{}^reset;"
-                            .format(p.client_id,
-                                    p.chat_prefix,
-                                    p.alias))
-                else:
-                    ret_list.append("{}{}^reset;".format(
-                        p.chat_prefix, p.alias))
+        for player in self.plugins.player_manager.players_here(location):
+            if connection.player.perm_check(
+                    "general_commands.who_clientids"):
+                ret_list.append(
+                    "[^red;{}^reset;] {}{}^reset;"
+                        .format(player.client_id,
+                                player.chat_prefix,
+                                player.alias))
+            else:
+                ret_list.append("{}{}^reset;".format(
+                    player.chat_prefix, player.alias))
         send_message(connection,
                      "{} players on planet:\n{}".format(len(ret_list),
                                                         ", ".join(ret_list)))
@@ -280,8 +287,12 @@ class GeneralCommands(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
-        current_time = datetime.datetime.now() - self.start_time
-        yield from send_message(connection, "Uptime: {}".format(current_time))
+
+        now = datetime.datetime.now() - self.start_time
+        text = "Uptime: {} days, {} hours, {} minutes."
+        yield from send_message(connection, text.format(now.days,
+                                                        now.seconds//3600,
+                                                        (now.seconds//60) % 60))
 
     @Command("shutdown",
              perm="general_commands.shutdown",
@@ -295,6 +306,7 @@ class GeneralCommands(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
+
         self.logger.warning("{} has called for a shutdown.".format(
             connection.player.alias))
         shutdown_time = 5
@@ -306,10 +318,8 @@ class GeneralCommands(SimpleCommandPlugin):
         broadcast(self, "^red;(ADMIN) The server is shutting down in {} "
                         "seconds.^reset;".format(shutdown_time))
         yield from asyncio.sleep(shutdown_time)
-        # this is a noisy shutdown (makes a bit of errors in the logs). Not
-        # sure how to make it better...
         self.logger.warning("Shutting down server now.")
-        sys.exit()
+        shutdown()
 
     @Command("maintenance_mode",
              perm="general_commands.maintenance_mode",
@@ -319,9 +329,11 @@ class GeneralCommands(SimpleCommandPlugin):
     def _maintenance(self, data, connection):
         if self.maintenance:
             self.maintenance = False
-            broadcast(self, "^red;NOTICE: Maintence mode disabled. "
+            broadcast(self, "^red;NOTICE: Maintenance mode disabled. "
                             "^reset;New connections are allowed.")
+            self.logger.info("Maintenance mode is now turned off.")
         else:
             self.maintenance = True
             broadcast(self, "^red;NOTICE: The server is now in maintenance "
                             "mode. ^reset;No additional clients can connect.")
+            self.logger.info("Maintenance mode is now turned on.")

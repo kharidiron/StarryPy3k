@@ -47,19 +47,19 @@ class WarpType(IntEnum):
 class WarpWorldType(IntEnum):
     CELESTIAL_WORLD = 1
     PLAYER_WORLD = 2
-    UNIQUE_WORLD = 3
-
-
-class SpawnTargetType(IntEnum):
-    ENTITY = 1
-    COORDINATES = 2
-    ASTEROID = 3
+    INSTANCE_WORLD = 3
 
 
 class WarpAliasType(IntEnum):
     RETURN = 0
     ORBITED = 1
     SHIP = 2
+
+
+class SpawnTargetType(IntEnum):
+    ENTITY = 1
+    COORDINATES = 2
+    ASTEROID = 3
 
 
 class ChatSendMode(IntEnum):
@@ -87,7 +87,7 @@ class SystemLocationType(IntEnum):
 
 
 class DamageType(IntEnum):
-    NO_DAMAGE = 0 # Assumed
+    NO_DAMAGE = 0  # Assumed
     DAMAGE = 1
     IGNORES_DEF = 2
     KNOCKBACK = 3
@@ -100,6 +100,7 @@ class DamageHitType(IntEnum):
     WEAK = 2
     SHIELD = 3
     KILL = 4
+
 
 class EntityInteractionType(IntEnum):
     NOMINAL = 0
@@ -235,6 +236,7 @@ class AsyncBytesIO(io.BytesIO):
         return super().read(*args, **kwargs)
 
 
+# noinspection PyTypeChecker
 @asyncio.coroutine
 def read_vlq(bytestream):
     """
@@ -282,6 +284,7 @@ def extractor(*args):
     return [x for x in filter(None, x)]
 
 
+# noinspection PyTypeChecker
 @asyncio.coroutine
 def read_packet(reader, direction):
     """
@@ -313,7 +316,7 @@ def read_packet(reader, direction):
         try:
             zobj = zlib.decompressobj()
             p['data'] = zobj.decompress(data)
-        except zlib.error as e:
+        except zlib.error:
             raise asyncio.IncompleteReadError
 
     p['original_data'] = packet_type + packet_size_data + data
@@ -377,8 +380,7 @@ class Command:
     interface for all commands, including roles, documentation, usage syntax,
     and aliases.
     """
-    def __init__(self, *aliases, role=None, roles=None, perm=None, doc=None,
-                 syntax=None, priority=0):
+    def __init__(self, *aliases, perm=None, doc=None, syntax=None, priority=0):
         if syntax is None:
             syntax = ()
         if isinstance(syntax, str):
@@ -421,9 +423,9 @@ class Command:
         return wrapped
 
 
-class StorageMixin:
-    """
-    Convenience class for adding access to a player's server-based storage.
-    """
-    def __init__(self):
-        self.storage = self.plugins.player_manager.get_storage(self)
+# class StorageMixin:
+#     """
+#     Convenience class for adding access to a player's server-based storage.
+#     """
+#     def __init__(self):
+#         self.storage = self.plugins.player_manager.get_storage(self)

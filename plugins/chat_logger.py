@@ -6,11 +6,12 @@ Log all in-game chat messages to the logger.
 Original authors: kharidiron
 """
 
-from base_plugin import BasePlugin
+from plugin_manager import BasePlugin
 
 
 class ChatLogger(BasePlugin):
     name = "chat_logger"
+    depends = ["player_manager"]
 
     def __init__(self):
         super().__init__()
@@ -26,6 +27,9 @@ class ChatLogger(BasePlugin):
         :param connection: The connection from which the packet came.
         :return: Boolean; Always true.
         """
+
         message = data["parsed"]["message"]
-        self.logger.info("{}: {}".format(connection.player.name, message))
+        # player = self.plugins.player_manager.players_online[connection]
+        player = connection.player
+        self.logger.info("{}: {}".format(player.alias, message))
         return True

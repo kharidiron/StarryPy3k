@@ -10,23 +10,39 @@ player's name tag.
 Original authors: teihoo, FZFalzar
 Updated for release: kharidiron
 """
+
 import asyncio
 import re
 from datetime import datetime
 
-import data_parser
-import pparser
-import packets
-from base_plugin import StorageCommandPlugin
-from utilities import Command, ChatSendMode, ChatReceiveMode, \
-    send_message, link_plugin_if_available
+import sqlalchemy as sqla
+
+from data_parser import ChatSent
+from packet_parser import packets, build_packet
+from plugin_manager import SimpleCommandPlugin
+from plugins.storage_manager import (DeclarativeBase, SessionAccessMixin,
+                                     db_session)
+from utilities import (Command, ChatSendMode, ChatReceiveMode, send_message,
+                       link_plugin_if_available)
 
 
 ###
 
-class ChatEnhancements(StorageCommandPlugin):
+class Ignore(DeclarativeBase):
+    __tablename__ = "ignores"
+
+    id = sqla.Column(sqla.Integer, primary_key=True, autoincrement=True)
+    player_uuid = sqla.Column(sqla.String(32))
+    ignore_uuid = sqla.Column(sqla.String(32))
+
+    def __repr__(self):
+        return "<Ignore({} is ignoring {}.)>".format(
+            self.player_uuid, self.ignore_uuid)
+
+
+class ChatEnhancements(SessionAccessMixin, SimpleCommandPlugin):
     name = "chat_enhancements"
-    depends = ["player_manager", "command_dispatcher"]
+    depends = ["player_manager", "command_dispatcher", "chat_manager"]
     default_config = {"chat_timestamps": True,
                       "timestamp_color": "^gray;"}
 
@@ -48,8 +64,6 @@ class ChatEnhancements(StorageCommandPlugin):
         self.last_whisper = {}
         self.social_spies = set()
         link_plugin_if_available(self, "irc_bot")
-        if "ignores" not in self.storage:
-            self.storage["ignores"] = {}
 
     # Packet hooks - look for these packets and act on them
 
@@ -71,24 +85,21 @@ class ChatEnhancements(StorageCommandPlugin):
                 joinmsg = re.match(r"Player '(.*)' (dis)?connected",
                                    data['parsed']['message'])
                 if joinmsg:
-                    joiner = self.plugins['player_manager'].get_player_by_name(
+                    joiner = self.plugins.player_manager.find_player(
                         joinmsg.group(1))
-                    type = "left" if joinmsg.group(2) is not None \
+                    msg_type = "left" if joinmsg.group(2) is not None \
                         else "joined"
                     data['parsed']['message'] = "{}{}^reset; has {} the " \
                                                 "server.".format(
-                        joiner.chat_prefix, joiner.alias, type)
+                        joiner.chat_prefix, joiner.alias, msg_type)
                     sender = self.make_timestamp()
             else:
-                sender = self.plugins['player_manager'].get_player_by_name(
+                sender = self.plugins.player_manager.find_player(
                     data["parsed"]["name"])
-                if connection.player.uuid not in self.storage["ignores"]:
-                    self.storage["ignores"][connection.player.uuid] = []
-                if sender.uuid in self.storage["ignores"][
-                        connection.player.uuid]:
+                if self.check_ignored(connection.player, sender):
                     return False
                 try:
-                    sender = self.decorate_line(sender.connection)
+                    sender = self.decorate_line(sender)
                 except AttributeError:
                     self.logger.warning("Sender {} is sending a message that "
                                         "the wrapper isn't handling correctly"
@@ -115,50 +126,70 @@ class ChatEnhancements(StorageCommandPlugin):
                  the message came from the server (since it doesn't need
                  colors) or if the message is a command.
         """
+
         message = data['parsed']['message']
         if message.startswith(self.command_dispatcher.command_prefix):
             return True
-        if self.plugins['chat_manager'].mute_check(connection.player):
+        if self.plugins.chat_manager.mute_check(connection.player):
             return False
 
-        sender = self.decorate_line(connection)
-        msg = "[SS]: " + data["parsed"]["message"]
-        for p in self.social_spies:
-            if data["parsed"]["send_mode"] in [ChatSendMode.LOCAL,
-                                               ChatSendMode.PARTY]:
-                yield from send_message(p.connection,
-                                        msg,
-                                        mode=ChatReceiveMode.BROADCAST,
-                                        name=sender)
+        sender = self.decorate_line(connection.player)
+        if data["parsed"]["send_mode"] in [ChatSendMode.LOCAL,
+                                           ChatSendMode.PARTY]:
+            yield from self.send_to_spies(connection, sender, 
+                                          data["parsed"]["message"])
 
         return True
 
     # Helper functions - Used by commands
 
-    def decorate_line(self, connection):
+    def decorate_line(self, player):
         timestamp = "{}> <".format(self.make_timestamp())
         try:
-            p = connection.player
-            sender = timestamp + p.chat_prefix + p.alias + "^reset;"
+            sender = timestamp + player.chat_prefix + player.alias + "^reset;"
         except AttributeError as e:
             self.logger.warning(
                 "AttributeError in colored_name: {}".format(str(e)))
-            sender = connection.player.alias
+            sender = player.alias
         return sender
 
     def make_timestamp(self):
         if self.cts:
-            return self.cts_color + datetime.now().strftime("%H:%M")+ "^reset;"
+            return self.cts_color + datetime.now().strftime("%H:%M") + "^reset;"
         else:
             return ""
 
+    def check_ignored(self, player, target):
+        """
+        Check if a player is ignoring another player.
+
+        :param player:
+        :param target:
+        :return:
+        """
+
+        with db_session(self.session) as session:
+            ignored = session.query(Ignore).filter_by(
+                player_uuid=player.uuid,
+                ignore_uuid=target.uuid).first()
+            return ignored
+
     @asyncio.coroutine
     def _send_to_server(self, message, mode, connection):
-        msg_base = data_parser.ChatSent.build(dict(message=" ".join(message),
-                                                   send_mode=mode))
-        msg_packet = pparser.build_packet(packets.packets['chat_sent'],
-                                          msg_base)
+        msg_base = ChatSent.build(dict(message=" ".join(message),
+                                       send_mode=mode))
+        msg_packet = build_packet(packets['chat_sent'], msg_base)
         yield from connection.client_raw_write(msg_packet)
+
+    @asyncio.coroutine
+    def send_to_spies(self, connection, sender, message):
+        ssmsg = "[SS]: " + message
+        for p in self.social_spies:
+            target = self.plugins.player_manager.get_connection(connection, p)
+            yield from send_message(target,
+                                    ssmsg,
+                                    mode=ChatReceiveMode.BROADCAST,
+                                    name=sender)
 
     # Commands - In-game actions that can be performed
 
@@ -174,20 +205,16 @@ class ChatEnhancements(StorageCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null
         """
-        if self.plugins['chat_manager'].mute_check(connection.player):
+
+        if self.plugins.chat_manager.mute_check(connection.player):
             send_message(connection, "You are muted and cannot chat.")
             return False
         if data:
-            msg = "[SS]: " + " ".join(data)
-            sender = self.decorate_line(connection)
-            for p in self.social_spies:
-                yield from send_message(p.connection,
-                                        msg,
-                                        mode=ChatReceiveMode.BROADCAST,
-                                        name=sender)
             yield from self._send_to_server(data,
                                             ChatSendMode.LOCAL,
                                             connection)
+            sender = self.decorate_line(connection.player)
+            yield from self.send_to_spies(connection, sender, " ".join(data))
             return True
 
     @Command("u",
@@ -201,7 +228,8 @@ class ChatEnhancements(StorageCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null
         """
-        if self.plugins['chat_manager'].mute_check(connection.player):
+
+        if self.plugins.chat_manager.mute_check(connection.player):
             send_message(connection, "You are muted and cannot chat.")
             return False
         if data:
@@ -211,14 +239,14 @@ class ChatEnhancements(StorageCommandPlugin):
             if link_plugin_if_available(self, "irc_bot"):
                 # Try sending it to IRC if we have that available.
                 asyncio.ensure_future(
-                    self.plugins["irc_bot"].bot_write(
+                    self.plugins.irc_bot.bot_write(
                         "<{}> {}".format(connection.player.alias,
                                          " ".join(data))))
             if link_plugin_if_available(self, "discord_bot"):
-                discord = self.plugins['discord_bot']
-                asyncio.ensure_future(discord.bot_write("**<{}>** {}"
-                                                        .format(
-                    connection.player.alias, " ".join(data))))
+                discord = self.plugins.discord_bot
+                asyncio.ensure_future(
+                    discord.bot_write("**<{}>** {}".format(
+                        connection.player.alias, " ".join(data))))
             return True
 
     @Command("p",
@@ -231,20 +259,16 @@ class ChatEnhancements(StorageCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null
         """
-        if self.plugins['chat_manager'].mute_check(connection.player):
+
+        if self.plugins.chat_manager.mute_check(connection.player):
             send_message(connection, "You are muted and cannot chat.")
             return False
         if data:
-            msg = "[SS]: " + " ".join(data)
-            sender = self.decorate_line(connection)
-            for p in self.social_spies:
-                yield from send_message(p.connection,
-                                        msg,
-                                        mode=ChatReceiveMode.BROADCAST,
-                                        name=sender)
             yield from self._send_to_server(data,
                                             ChatSendMode.PARTY,
                                             connection)
+            sender = self.decorate_line(connection.player)
+            yield from self.send_to_spies(connection, sender, " ".join(data))
             return True
 
     @Command("whisper", "w",
@@ -260,6 +284,7 @@ class ChatEnhancements(StorageCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null
         """
+
         try:
             name = data[0]
         except IndexError:
@@ -272,24 +297,25 @@ class ChatEnhancements(StorageCommandPlugin):
                              "Player {} is not currently logged in."
                              "".format(recipient.alias))
                 return False
-            if connection.player.uuid in self.storage["ignores"][recipient.uuid]:
-                send_message(connection, "Player {} is currently ignoring you."
-                             .format(recipient.alias))
-                return False
-            if recipient.uuid in self.storage["ignores"][
-                    connection.player.uuid]:
+            if self.check_ignored(recipient, connection.player):
                 send_message(connection, "Cannot send message to player {} "
                                          "as you are currently ignoring "
                                          "them.".format(recipient.alias))
+                return False
+            if self.check_ignored(connection.player, recipient):
+                send_message(connection, "Player {} is currently ignoring you."
+                             .format(recipient.alias))
                 return False
             self.last_whisper[recipient.uuid] = connection.player.alias
             self.last_whisper[connection.player.uuid] = recipient.alias
             message = " ".join(data[1:])
             client_id = connection.player.client_id
-            sender = self.decorate_line(connection)
+            sender = self.decorate_line(connection.player)
             send_mode = ChatReceiveMode.WHISPER
             channel = "Private"
-            yield from send_message(recipient.connection,
+            target = self.plugins.player_manager.get_connection(connection,
+                                                                recipient)
+            yield from send_message(target,
                                     message,
                                     client_id=client_id,
                                     name=sender,
@@ -304,12 +330,7 @@ class ChatEnhancements(StorageCommandPlugin):
             sssender = "{} -> {}{}^reset;".format(sender,
                                                   recipient.chat_prefix,
                                                   recipient.alias)
-            ssmsg = "[SS]: " + message
-            for p in self.social_spies:
-                yield from send_message(p.connection,
-                                        ssmsg,
-                                        name=sssender,
-                                        mode=ChatReceiveMode.BROADCAST)
+            yield from self.send_to_spies(connection, sssender, message)
         else:
             yield from send_message(connection,
                                     "Couldn't find a player with name {}"
@@ -327,6 +348,7 @@ class ChatEnhancements(StorageCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null
         """
+
         if connection.player.uuid in self.last_whisper:
             name = self.last_whisper[connection.player.uuid]
             recipient = self.plugins.player_manager.find_player(name)
@@ -338,24 +360,25 @@ class ChatEnhancements(StorageCommandPlugin):
                              "Player {} is not currently logged in."
                              "".format(recipient.alias))
                 return False
-            if connection.player.uuid in self.storage["ignores"][recipient.uuid]:
-                send_message(connection, "Player {} is currently ignoring you."
-                             .format(recipient.alias))
-                return False
-            if recipient.uuid in self.storage["ignores"][
-                    connection.player.uuid]:
+            if self.check_ignored(recipient, connection.player):
                 send_message(connection, "Cannot send message to player {} "
                                          "as you are currently ignoring "
                                          "them.".format(recipient.alias))
+                return False
+            if self.check_ignored(connection.player, recipient):
+                send_message(connection, "Player {} is currently ignoring you."
+                             .format(recipient.alias))
                 return False
             self.last_whisper[recipient.uuid] = connection.player.alias
             self.last_whisper[connection.player.uuid] = recipient.alias
             message = " ".join(data)
             client_id = connection.player.client_id
-            sender = self.decorate_line(connection)
+            sender = self.decorate_line(connection.player)
             send_mode = ChatReceiveMode.WHISPER
             channel = "Private"
-            yield from send_message(recipient.connection,
+            target = self.plugins.player_manager.get_connection(connection,
+                                                                recipient)
+            yield from send_message(target,
                                     message,
                                     client_id=client_id,
                                     name=sender,
@@ -370,12 +393,7 @@ class ChatEnhancements(StorageCommandPlugin):
             sssender = "{} -> {}{}^reset;".format(sender,
                                                   recipient.chat_prefix,
                                                   recipient.alias)
-            ssmsg = "[SS]: " + message
-            for p in self.social_spies:
-                yield from send_message(p.connection,
-                                        ssmsg,
-                                        name=sssender,
-                                        mode=ChatReceiveMode.BROADCAST)
+            yield from self.send_to_spies(connection, sssender, message)
         else:
             yield from send_message(connection,
                                     "You haven't been messaged by anyone.")
@@ -385,7 +403,7 @@ class ChatEnhancements(StorageCommandPlugin):
              doc="Ignores a player, preventing you from seeing their "
                  "messages. Use /ignore again to toggle.")
     def _ignore(self, data, connection):
-        user = connection.player.uuid
+        player = connection.player.uuid
         try:
             name = data[0]
         except IndexError:
@@ -395,16 +413,21 @@ class ChatEnhancements(StorageCommandPlugin):
             if target == connection.player:
                 send_message(connection, "Can't ignore yourself!")
                 return False
-            if not self.storage["ignores"][user]:
-                self.storage["ignores"][user] = []
-            if target.uuid in self.storage["ignores"][user]:
-                self.storage["ignores"][user].remove(target.uuid)
-                yield from send_message(connection, "User {} removed from "
-                                        "ignores list.".format(target.alias))
-            else:
-                self.storage["ignores"][user].append(target.uuid)
-                yield from send_message(connection, "User {} added to ignores "
-                                        "list.".format(target.alias))
+            with db_session(self.session) as session:
+                ignored = session.query(Ignore).filter_by(
+                    player_uuid=player, ignore_uuid=target.uuid).first()
+                if not ignored:
+                    ignore = Ignore(player_uuid=player, ignore_uuid=target.uuid)
+                    session.add(ignore)
+                    yield from send_message(connection,
+                                            "User {} added to ignores "
+                                            "list.".format(target.alias))
+                else:
+                    session.delete(ignored)
+                    yield from send_message(connection,
+                                            "User {} removed from ignores "
+                                            "list.".format(target.alias))
+                session.commit()
 
     @Command("socialspy",
              perm="chat_enhancements.socialspy",
@@ -414,6 +437,10 @@ class ChatEnhancements(StorageCommandPlugin):
         if connection.player in self.social_spies:
             self.social_spies.remove(connection.player)
             yield from send_message(connection, "Social spy disabled.")
+            self.logger.debug(
+                "{} has disabled social spy.".format(connection.player.alias))
         else:
             self.social_spies.add(connection.player)
             yield from send_message(connection, "Social spy enabled.")
+            self.logger.debug(
+                "{} has enabled social spy.".format(connection.player.alias))

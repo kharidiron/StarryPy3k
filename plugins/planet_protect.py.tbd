@@ -63,8 +63,7 @@ class PlanetProtect(StorageCommandPlugin):
             for protection in self.storage["locations"].values():
                 convert = {}
                 for alias in protection.allowed_builders:
-                    plr = self.plugins['player_manager']\
-                        .get_player_by_alias(alias)
+                    plr = self.plugins.player_manager.get_player_by_alias(alias)
                     if plr:
                         convert[alias] = plr.uuid
                 protection.allowed_builders = {x for x in convert.values()}
@@ -372,8 +371,8 @@ class PlanetProtect(StorageCommandPlugin):
             uuids = protection.get_builders()
             aliases = []
             for uid in uuids:
-                aliases.append(self.plugins['player_manager']
-                               .get_player_by_uuid(uid).alias)
+                aliases.append(
+                    self.plugins.player_manager.get_player_by_uuid(uid).alias)
             aliases = ", ".join(aliases)
             send_message(connection,
                          "Players allowed to build at location '{}': {}"

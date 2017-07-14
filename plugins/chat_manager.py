@@ -8,25 +8,23 @@ Original authors: AMorporkian
 Updated for release: kharidiron
 """
 
-from base_plugin import SimpleCommandPlugin
+from plugin_manager import SimpleCommandPlugin
+from plugins.storage_manager import SessionAccessMixin, db_session
 from utilities import Command, send_message
 
 
 ###
 
-class ChatManager(SimpleCommandPlugin):
+
+class ChatManager(SessionAccessMixin, SimpleCommandPlugin):
     name = "chat_manager"
     depends = ["player_manager", "command_dispatcher"]
 
     def __init__(self):
         super().__init__()
-        self.storage = None
 
     def activate(self):
         super().activate()
-        self.storage = self.plugins.player_manager.get_storage(self)
-        if "mutes" not in self.storage:
-            self.storage["mutes"] = set()
 
     # Packet hooks - look for these packets and act on them
 
@@ -40,6 +38,7 @@ class ChatManager(SimpleCommandPlugin):
                  player is muted (preventing packet from being passed along.
                  Commands are treated as truthy values.
         """
+
         message = data["parsed"]["message"]
         if message.startswith(
                 self.plugins.command_dispatcher.plugin_config.command_prefix):
@@ -60,7 +59,8 @@ class ChatManager(SimpleCommandPlugin):
         :param player: Target player to check.
         :return: Boolean. True if player is muted, False if they are not.
         """
-        return player in self.storage.mutes
+
+        return player.muted
 
     # Commands - In-game actions that can be performed
 
@@ -78,6 +78,7 @@ class ChatManager(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null
         """
+
         alias = " ".join(data)
         player = self.plugins.player_manager.find_player(alias)
         if player is None:
@@ -91,11 +92,24 @@ class ChatManager(SimpleCommandPlugin):
                          "{} is unmuteable.".format(player.alias))
             return
         else:
-            self.storage.mutes.add(player)
+            with db_session(self.session) as session:
+                player.muted = True
+                session.commit()
+            # FIXME - replace with get_connection from player manager
+            for c in connection.factory.connections:
+                if player.uuid == c.player.uuid:
+                    target_connection = c
+                    send_message(target_connection,
+                                 "{} has muted you.".format(
+                                     connection.player.alias))
+                    break
+            else:
+                send_message(connection,
+                             "{} is not connected.".format(player.alias))
             send_message(connection,
                          "{} has been muted.".format(player.alias))
-            send_message(player.connection,
-                         "{} has muted you.".format(connection.player.alias))
+            self.logger.info("{} has muted {}.".format(connection.player.alias,
+                                                       player.alias))
 
     @Command("unmute",
              perm="chat_manager.mute",
@@ -111,6 +125,7 @@ class ChatManager(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null
         """
+
         alias = " ".join(data)
         player = self.plugins.player_manager.find_player(alias)
         if player is None:
@@ -120,8 +135,20 @@ class ChatManager(SimpleCommandPlugin):
                          "{} isn't muted.".format(player.alias))
             return
         else:
-            self.storage.mutes.remove(player)
+            with db_session(self.session) as session:
+                player.muted = False
+                session.commit()
+            for c in connection.factory.connections:
+                if player.uuid == c.player.uuid:
+                    target_connection = c
+                    send_message(target_connection,
+                                 "{} has unmuted you.".format(
+                                     connection.player.alias))
+                    break
+            else:
+                send_message(connection,
+                             "{} is not connected.".format(player.alias))
             send_message(connection,
                          "{} has been unmuted.".format(player.alias))
-            send_message(player.connection,
-                         "{} has unmuted you.".format(connection.player.alias))
+            self.logger.info("{} has unmuted {}.".format(connection.player.alias,
+                                                         player.alias))

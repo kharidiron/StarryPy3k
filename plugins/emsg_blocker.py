@@ -6,16 +6,19 @@ Filter out harmful or malicious entity messages from players.
 Original authors: medeor413
 """
 
-from base_plugin import BasePlugin
+from plugin_manager import BasePlugin
 from utilities import Direction
 
 
-class ChatLogger(BasePlugin):
+###
+
+class EntityMessageBlocker(BasePlugin):
     name = "emsg_blocker"
 
     def __init__(self):
         super().__init__()
         self.blocked_messages = []
+        self.blocked_world_properties = []
 
     def activate(self):
         super().activate()
@@ -31,16 +34,19 @@ class ChatLogger(BasePlugin):
             "invinciblePlayers"
         ]
 
+    # Packet hooks - look for these packets and act on them
+
     def on_entity_message(self, data, connection):
         """
-        Catch when an entity message is sent and block it, depending on its
-        contents.
+        Catch when an entity message is sent and block it, depending 
+        on its contents.
 
         :param data: The packet containing the message.
         :param connection: The connection from which the packet came.
         :return: Boolean; True if the message is allowed, false if it's
         blocked.
         """
+
         if data['direction'] == Direction.TO_CLIENT:
             # The server probably isn't sending malicious messages
             return True
@@ -55,12 +61,14 @@ class ChatLogger(BasePlugin):
 
     def on_update_world_properties(self, data, connection):
         """
-        Catch when world properties are modified and block it, depending on
-        its contents.
+        Catch when world properties are modified and block it, depending
+        on its contents.
+
         :param data:
         :param connection:
         :return: Boolean: True if the change is allowed, false otherwise
         """
+
         if data['direction'] == Direction.TO_CLIENT:
             # The server is just informing the clients of changes.
             return True
@@ -73,3 +81,4 @@ class ChatLogger(BasePlugin):
                             key, connection.player.alias))
                         return False
             return True
+

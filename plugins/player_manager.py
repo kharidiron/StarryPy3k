@@ -11,120 +11,103 @@ Updated for release: kharidiron
 """
 
 import asyncio
-import datetime
+from datetime import datetime
 import pprint
 import re
-import shelve
 import json
-from operator import attrgetter
 
-from base_plugin import SimpleCommandPlugin
-from data_parser import ConnectFailure, ServerDisconnect
-from pparser import build_packet
-from utilities import Command, DotDict, State, broadcast, send_message, \
-    WarpType, WarpWorldType, WarpAliasType
-from packets import packets
+import sqlalchemy as sqla
+from sqlalchemy.orm import relationship
+
+from data_parser import ConnectFailure, ServerDisconnect, WorldStop
+from packet_parser import build_packet, packets
+from plugin_manager import SimpleCommandPlugin
+from plugins.storage_manager import (DeclarativeBase, SessionAccessMixin,
+                                     db_session, cache_query, pack, unpack)
+from utilities import (Command, State, broadcast, send_message,
+                       WarpType, WarpWorldType, WarpAliasType)
 
 
-class Player:
-    """
-    Prototype class for a player.
-    """
-    def __init__(self, uuid, species="unknown", name="", alias="",
-                 last_seen=None, ranks=None, logged_in=False,
-                 connection=None, client_id=-1, ip="", planet="",
-                 muted=False, state=None, team_id=None):
-        """
-        Initialize a player object. Populate all the necessary details.
+class Player(DeclarativeBase):
+    __tablename__ = "players"
 
-        :param uuid:
-        :param species:
-        :param name:
-        :param last_seen:
-        :param ranks:
-        :param logged_in:
-        :param connection:
-        :param client_id:
-        :param ip:
-        :param planet:
-        :param muted:
-        :param state:
-        :param team_id:
-        :return:
-        """
-        self.uuid = uuid
-        self.species = species
-        self.name = name
-        self.alias = alias
-        if last_seen is None:
-            self.last_seen = datetime.datetime.now()
-        else:
-            self.last_seen = last_seen
-        if ranks is None:
-            self.ranks = set()
-        else:
-            self.ranks = set(ranks)
-        self.granted_perms = set()
-        self.revoked_perms = set()
-        self.permissions = set()
-        self.chat_prefix = ""
-        self.priority = 0
-        self.logged_in = logged_in
-        self.connection = connection
-        self.client_id = client_id
-        self.ip = ip
-        self.location = planet
-        self.last_location = planet
-        self.muted = muted
-        self.team_id = team_id
+    # fixed values
+    uuid = sqla.Column(sqla.String(32), primary_key=True)
+    first_seen = sqla.Column(sqla.DateTime)
+
+    # semi-fixed values
+    name = sqla.Column(sqla.String(255))
+    alias = sqla.Column(sqla.String(20))
+    species = sqla.Column(sqla.String(16))
+    ranks = sqla.Column(sqla.String(255))
+    permissions = sqla.Column(sqla.Text)
+    granted_perms = sqla.Column(sqla.String(255))
+    revoked_perms = sqla.Column(sqla.String(255))
+    chat_prefix = sqla.Column(sqla.String(255))
+    priority = sqla.Column(sqla.Integer)
+    muted = sqla.Column(sqla.Boolean)
+    banned = sqla.Column(sqla.Boolean)
+
+    # mutable values
+    logged_in = sqla.Column(sqla.Boolean)
+    client_id = sqla.Column(sqla.Integer)
+    last_seen = sqla.Column(sqla.DateTime)
+    current_ip = sqla.Column(sqla.String(15))
+    location = sqla.Column(sqla.String(255))
+    last_location = sqla.Column(sqla.String(255))
+
+    def __repr__(self):
+        return "<Player(name={}, uuid={}, logged_in={})>".format(
+            self.name, self.uuid, self.logged_in)
 
     def __str__(self):
-        """
-        Convenience method for peeking at the Player object.
-
-        :return: Pretty-printed dictionary of Player object.
-        """
         return pprint.pformat(self.__dict__)
 
-    def update_ranks(self, ranks):
+    def update_ranks(self, player, ranks):
         """
         Update the player's info to match any changes made to their ranks.
 
         :return: Null.
         """
-        self.permissions = set()
+
+        permissions = set()
         highest_rank = None
-        for r in self.ranks:
+        for r in unpack(self.ranks):
             if not highest_rank:
                 highest_rank = r
-            self.permissions |= ranks[r]['permissions']
+
+            permissions |= ranks[r]['permissions']
             if ranks[r]['priority'] > ranks[highest_rank]['priority']:
                 highest_rank = r
-        self.permissions |= self.granted_perms
-        self.permissions -= self.revoked_perms
+        permissions |= unpack(self.granted_perms)
+        permissions -= unpack(self.revoked_perms)
         if highest_rank:
-            self.priority = ranks[highest_rank]['priority']
-            self.chat_prefix = ranks[highest_rank]['prefix']
+            player.priority = ranks[highest_rank]['priority']
+            player.chat_prefix = ranks[highest_rank]['prefix']
         else:
-            self.priority = 0
-            self.chat_prefix = ""
+            player.priority = 0
+            player.chat_prefix = ""
+        player.permissions = pack(permissions)
 
     def perm_check(self, perm):
         if not perm:
             return True
-        elif "special.allperms" in self.permissions:
+        elif "special.allperms" in unpack(self.permissions):
             return True
-        elif perm.lower() in self.revoked_perms:
+        elif perm.lower() in unpack(self.revoked_perms):
             return False
-        elif perm.lower() in self.permissions:
+        elif perm.lower() in unpack(self.permissions):
             return True
         else:
             return False
 
-class Ship:
-    """
-    Prototype class for a Ship.
-    """
+
+class Ship(DeclarativeBase):
+    __tablename__ = "ships"
+
+    uuid = sqla.Column(sqla.String(32), primary_key=True)
+    player = sqla.Column(sqla.String(20))
+
     def __init__(self, uuid, player):
         self.uuid = uuid
         self.player = player
@@ -132,69 +115,125 @@ class Ship:
     def __str__(self):
         return "{}'s ship".format(self.player)
 
-    def locationtype(self):
-        return "ShipWorld"
+    def __repr__(self):
+        return "<Ship(player={}, uuid={})>".format(
+            self.player, self.uuid)
 
-
-class Planet:
-    """
-    Prototype class for a planet.
-    """
-    def __init__(self, location=(0, 0, 0), planet=0,
-                 satellite=0, name=""):
-        self.x, self.y, self.z = location
-        self.planet = planet
-        self.satellite = satellite
-        self.name = name
-
-    def _gen_planet_string(self):
-        s = list("CelestialWorld:")
-        s.append("{}:{}:{}:{}".format(self.x, self.y, self.z, self.planet))
-        if self.satellite > int(0):
-            s.append(":{}".format(self.satellite))
+    @staticmethod
+    def location_string(uuid):
+        s = list("ClientShipWorld:")
+        s.append("{}".format(uuid))
         return "".join(s)
 
-    def __str__(self):
-        return "CelestialWorld:{}:{}:{}:{}:{}".format(self.x, self.y, self.z,
-                                                      self.planet,
-                                                      self.satellite)
+    @staticmethod
+    def location_type():
+        return "ClientShipWorld"
 
-    def locationtype(self):
+
+class Planet(DeclarativeBase):
+    __tablename__ = "planets"
+
+    id = sqla.Column(sqla.Integer, primary_key=True, autoincrement=True)
+    x = sqla.Column(sqla.Integer)
+    y = sqla.Column(sqla.Integer)
+    z = sqla.Column(sqla.Integer)
+    orbit = sqla.Column(sqla.Integer)
+    satellite = sqla.Column(sqla.Integer)
+    location = sqla.Column(sqla.String(64))
+    name = sqla.Column(sqla.String(64))
+
+    def __init__(self, x, y, z, orbit, satellite, name=None):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.orbit = orbit
+        self.satellite = satellite
+        self.name = name
+        self.location = self.location_string(self.x, self.y, self.z,
+                                             self.orbit, self.satellite)
+
+    def __str__(self):
+        return self.location
+
+    def __repr__(self):
+        return ("<Planet(x={}, y={}, z={}, orbit={}, satellite={}, name={})>" 
+                "".format(self.x, self.y, self.z, self.orbit, self.satellite,
+                          self.name))
+
+    @staticmethod
+    def location_string(x, y, z, orbit, satellite, short=False):
+        s = list("CelestialWorld:")
+        s.append("{}:{}:{}:{}".format(x, y, z, orbit))
+        if satellite > int(0) or not short:
+            s.append(":{}".format(satellite))
+        return "".join(s)
+
+    @staticmethod
+    def location_type():
         return "CelestialWorld"
 
 
-class IPBan:
-    """
-    Prototype class a Ban object.
-    """
-    def __init__(self, ip, reason, banned_by, timeout=None):
-        self.ip = ip
-        self.reason = reason
-        self.timeout = timeout
-        self.banned_by = banned_by
-        self.banned_at = datetime.datetime.now()
+class IPBan(DeclarativeBase):
+    __tablename__ = "ip_bans"
+
+    id = sqla.Column(sqla.Integer, primary_key=True, autoincrement=True)
+    ip = sqla.Column(sqla.String(20))
+    reason = sqla.Column(sqla.String(255))
+    banned_by = sqla.Column(sqla.String(20))
+    banned_at = sqla.Column(sqla.DateTime)
+    duration = sqla.Column(sqla.String(10))
+
+    def __repr__(self):
+        return "<IPBan(ip={}, reason={}, by={}, when={} duration={}".format(
+            self.ip, self.reason, self.banned_by, self.banned_at, self.duration)
+
+
+class UUIDBan(DeclarativeBase):
+    __tablename__ = "uuid_bans"
+
+    id = sqla.Column(sqla.Integer, primary_key=True, autoincrement=True)
+    uuid = sqla.Column(sqla.String(32))
+    reason = sqla.Column(sqla.String(255))
+    banned_by = sqla.Column(sqla.String(20))
+    banned_at = sqla.Column(sqla.DateTime)
+    duration = sqla.Column(sqla.String(10))
+
+    def __repr__(self):
+        return "<UUIDBan(uuid={}, reason={}, by={}, when={} duration={}".format(
+            self.uuid, self.reason, self.banned_by, self.banned_at,
+            self.duration)
+
+
+class IP(DeclarativeBase):
+    __tablename__ = "ips"
+
+    id = sqla.Column(sqla.Integer, primary_key=True, autoincrement=True)
+    ip = sqla.Column(sqla.String(15))
+    uuid = sqla.Column(sqla.String(32), sqla.ForeignKey("players.uuid"))
+    last_seen = sqla.Column(sqla.DateTime)
+
+    player = relationship("Player", back_populates="ips")
+
+    def __repr__(self):
+        return "<IP(ip={}, uuid={})>".format(self.ip, self.uuid)
+
+
+Player.ips = relationship("IP", order_by=IP.id, back_populates="player")
 
 
 ###
 
-class PlayerManager(SimpleCommandPlugin):
+class PlayerManager(SessionAccessMixin, SimpleCommandPlugin):
     name = "player_manager"
 
     def __init__(self):
-        self.default_config = {"player_db": "config/player",
-                               "owner_uuid": "!--REPLACE IN CONFIG FILE--!",
+        self.default_config = {"owner_uuid": "!--REPLACE IN CONFIG FILE--!",
                                "allowed_species": ["apex", "avian", "glitch",
                                                    "floran", "human", "hylotl",
                                                    "penguin", "novakid"],
                                "owner_ranks": ["Owner"],
                                "new_user_ranks": ["Guest"]}
         super().__init__()
-        self.shelf = shelve.open(self.plugin_config.player_db, writeback=True)
-        self.sync()
-        self.players = self.shelf["players"]
-        self.planets = self.shelf["planets"]
-        self.plugin_shelf = self.shelf["plugins"]
-        self.players_online = []
         try:
             with open("config/permissions.json", "r") as file:
                 self.rank_config = json.load(file)
@@ -206,8 +245,8 @@ class PlayerManager(SimpleCommandPlugin):
             self.logger.error("Fatal: Could not parse permissions.json!")
             self.logger.error(e)
             raise SystemExit
-        self.ranks = self._rebuild_ranks(self.rank_config)
-        asyncio.ensure_future(self._reap())
+        self._clean_slate()
+        self.server_ranks = self._rebuild_ranks(self.rank_config)
 
     # Packet hooks - look for these packets and act on them
 
@@ -220,6 +259,7 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Boolean: True. Must be true, so that packet get passed on.
         """
+
         connection.state = State.VERSION_SENT
         return True
 
@@ -233,6 +273,7 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection:
         :return: Boolean: True. Must be true, so that packet get passed on.
         """
+
         connection.state = State.HANDSHAKE_CHALLENGE_SENT
         return True
 
@@ -246,6 +287,7 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection:
         :return: Boolean: True. Must be true, so that packet get passed on.
         """
+
         connection.state = State.HANDSHAKE_RESPONSE_RECEIVED
         return True
 
@@ -261,15 +303,16 @@ class PlayerManager(SimpleCommandPlugin):
         :return: Boolean: True on successful connection, False on a
                  failed connection.
         """
+
         try:
-            player = yield from self._add_or_get_player(**data["parsed"])
+            player = yield from self._add_or_get_player(**data["parsed"],
+                                                        ip=connection.client_ip)
             self.check_bans(connection)
-            self.check_species(player)
+            self.check_species(player.species)
         except (NameError, ValueError) as e:
             yield from connection.raw_write(self.build_rejection(str(e)))
             connection.die()
             return False
-        player.ip = connection.client_ip
         connection.player = player
         return True
 
@@ -284,13 +327,18 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection:
         :return: Boolean: True. Must be true, so that packet get passed on.
         """
+
         response = data["parsed"]
-        connection.player.connection = connection
-        connection.player.client_id = response["client_id"]
+        player = connection.player
+        with db_session(self.session) as session:
+            player.logged_in = True
+            player.last_seen = datetime.now()
+            player.client_id = response["client_id"]
+            session.commit()
         connection.state = State.CONNECTED
-        connection.player.logged_in = True
-        connection.player.last_seen = datetime.datetime.now()
-        self.players_online.append(connection.player.uuid)
+        connection.client_id = response["client_id"]
+        self.logger.info("Player {} [client id: {}] has successfully connected."
+                         "".format(player.alias, player.client_id))
         return True
 
     def on_client_disconnect_request(self, data, connection):
@@ -303,6 +351,9 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection:
         :return: Boolean: True. Must be true, so that packet get passed on.
         """
+
+        player = connection.player
+        self.logger.info("Player {} is disconnecting.".format(player.name))
         return True
 
     def on_server_disconnect(self, data, connection):
@@ -315,7 +366,8 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection:
         :return: Boolean: True. Must be true, so that packet get passed on.
         """
-        self._set_offline(connection)
+
+        yield from self._set_offline(connection)
         return True
 
     def on_world_start(self, data, connection):
@@ -328,14 +380,32 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection:
         :return: Boolean: True. Don't stop the packet here.
         """
-        planet = data["parsed"]["template_data"]
-        if planet["celestialParameters"] is not None:
+
+        player = connection.player
+        planet_data = data["parsed"]["template_data"]
+        if planet_data["celestialParameters"] is not None:
             location = yield from self._add_or_get_planet(
-                **planet["celestialParameters"]["coordinate"])
-            connection.player.location = location
+                *planet_data[
+                    "celestialParameters"]["coordinate"]["location"],
+                orbit=planet_data[
+                    "celestialParameters"]["coordinate"]["planet"],
+                satellite=planet_data[
+                    "celestialParameters"]["coordinate"]["satellite"],
+                name=planet_data[
+                    "celestialParameters"]["name"])
+
+            with db_session(self.session) as session:
+                player.location = str(location)
+                session.commit()
+
         self.logger.info("Player {} is now at location: {}".format(
-            connection.player.alias,
-            connection.player.location))
+            player.alias, player.location))
+
+        return True
+
+    def on_player_warp(self, data, connection):
+        player = connection.player
+        self.logger.info("Player {} has initiated a warp.".format(player.alias))
         return True
 
     def on_player_warp_result(self, data, connection):
@@ -348,76 +418,43 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection:
         :return: Boolean: True. Don't stop the packet here.
         """
+
+        def _update_location(player, location):
+            with db_session(self.session) as session:
+                if player.location:
+                    player.last_location = player.location
+                player.location = str(location)
+                session.commit()
+
+        player = connection.player
+        location = "Unknown"
         if data["parsed"]["warp_success"]:
             warp_data = data["parsed"]["warp_action"]
-            p = connection.player
-            if warp_data["warp_type"] == WarpType.TO_ALIAS:
+            if warp_data["warp_type"] == WarpType.TO_WORLD:
+                if warp_data["world_id"] == WarpWorldType.CELESTIAL_WORLD:
+                    location = yield from self._add_or_get_planet(
+                        **warp_data["celestial_coordinates"])
+                elif warp_data["world_id"] == WarpWorldType.PLAYER_WORLD:
+                    location = yield from self._add_or_get_ship(
+                        warp_data["ship_id"].decode("utf-8"))
+                elif warp_data["world_id"] == WarpWorldType.INSTANCE_WORLD:
+                    location = yield from self._add_or_get_instance(
+                        warp_data)
+            elif warp_data["warp_type"] == WarpType.TO_PLAYER:
+                target = self.get_player_by_uuid(
+                    warp_data["player_id"].decode("utf-8"))
+                location = target.location
+            elif warp_data["warp_type"] == WarpType.TO_ALIAS:
                 if warp_data["alias_id"] == WarpAliasType.ORBITED:
-                    # down to planet, need coordinates from world_start
-                    p.last_location = p.location
+                    # Pass on this here, and store the value in on_world_start
                     pass
                 elif warp_data["alias_id"] == WarpAliasType.SHIP:
-                    # back on own ship
-                    p.last_location = p.location
-                    p.location = yield from self._add_or_get_ship(p.uuid)
+                    location = yield from self._add_or_get_ship(
+                        player.uuid)
                 elif warp_data["alias_id"] == WarpAliasType.RETURN:
-                    p.location, p.last_location = p.last_location, p.location
-            elif warp_data["warp_type"] == WarpType.TO_PLAYER:
-                target = self.get_player_by_uuid(warp_data["player_id"]
-                    .decode("utf-8"))
-                p.last_location = p.location
-                p.location = target.location
-            elif warp_data["warp_type"] == WarpType.TO_WORLD:
-                if warp_data["world_id"] == WarpWorldType.CELESTIAL_WORLD:
-                    p.last_location = p.location
-                    pass
-                elif warp_data["world_id"] == WarpWorldType.PLAYER_WORLD:
-                    p.last_location = p.location
-                    p.location = yield from self._add_or_get_ship(
-                        warp_data["ship_id"])
-                elif warp_data["world_id"] == WarpWorldType.UNIQUE_WORLD:
-                    p.last_location = p.location
-                    p.location = yield from self._add_or_get_instance(warp_data)
-                elif warp_data["world_id"] == WarpWorldType.MISSION_WORLD:
-                    p.last_location = p.location
-                    pass
+                    location = player.last_location
+            _update_location(player, location)
         return True
-
-    # def on_client_context_update(self, data, connection):
-    #     """
-    #
-    #     :param data:
-    #     :param connection:
-    #     :return: Boolean: True. Must be true, so that packet get passed on.
-    #     """
-    #     for data_key, data_set in data["parsed"]["contexts"].items():
-    #         if isinstance(data_set, dict):
-    #             try:
-    #                 if "request" in data_set["command"]:
-    #                     if "team.acceptInvitation" in data_set["handler"]:
-    #                         invitee_uuid = data_set["arguments"]["inviteeUuid"]
-    #                         invitee = self.get_player_by_uuid(invitee_uuid)
-    #                         self.logger.debug(
-    #                             "{} joined team.".format(invitee.name))
-    #                     elif "team.removeFromTeam" in data_set["handler"]:
-    #                         player_uuid = data_set["arguments"]["playerUuid"]
-    #                         target = self.get_player_by_uuid(player_uuid)
-    #                         target.team_id = None
-    #                         self.logger.debug(
-    #                             "{} left team.".format(target.name))
-    #                     else:
-    #                         continue
-    #                 elif "response" in data_set["command"]:
-    #                     if data_set["result"]:
-    #                         if "teamUuid" in data_set["result"]:
-    #                             team_uuid = str(data_set["result"]["teamUuid"])
-    #                             if team_uuid != connection.player.team_id:
-    #                                 connection.player.team_id = team_uuid
-    #             except KeyError:
-    #                 continue
-    #         else:
-    #             continue
-    #     return True
 
     def on_step_update(self, data, connection):
         """
@@ -429,31 +466,40 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection:
         :return: Boolean: True. Must be true, so that packet get passed on.
         """
-        connection.state = State.CONNECTED_WITH_HEARTBEAT
+
+        if connection.state != State.CONNECTED_WITH_HEARTBEAT:
+            connection.state = State.CONNECTED_WITH_HEARTBEAT
         return True
 
     # Helper functions - Used by hooks and commands
 
-    def _reap(self):
+    def _clean_slate(self):
         """
-        Helper function to remove players that are not marked as logged in,
-        but really aren't.
+        Start everything off with a clean slate. Log out players who are still
+        marked as 'logged in' when the server starts.
 
-        :return: Null.
+        :return: Boolean. True.
         """
-        while True:
-            yield from asyncio.sleep(10)
-            # self.logger.debug("Player reaper running:")
-            for player in self.players_online:
-                target = self.get_player_by_uuid(player)
-                if target.connection.state is State.DISCONNECTED or not target.connection:
-                    self.logger.warning("Removing stale player connection: {}"
-                                        "".format(target.name))
-                    target.connection = None
-                    target.logged_in = False
-                    target.location = None
-                    self.players_online.remove(target.uuid)
 
+        with db_session(self.session) as session:
+            players = session.query(Player).filter_by(logged_in=True).all()
+            for player in players:
+                self.logger.debug(
+                    "Setting {} logged_in to false.".format(player.alias))
+                player.logged_in = False
+                player.client_id = None
+                player.location = ""
+
+            players = session.query(Player).filter(
+                Player.client_id.isnot(None)).all()
+            for player in players:
+                player.client_id = None
+                player.location = ""
+
+            session.commit()
+        return True
+
+    @asyncio.coroutine
     def _set_offline(self, connection):
         """
         Convenience function to set all the players variables to off.
@@ -461,11 +507,14 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection: The connection to turn off.
         :return: Boolean, True. Always True, since called from the on_ packets.
         """
-        connection.player.connection = None
-        connection.player.logged_in = False
-        connection.player.location = None
-        connection.player.last_seen = datetime.datetime.now()
-        self.players_online.remove(connection.player.uuid)
+
+        player = connection.player
+        with db_session(self.session) as session:
+            player.logged_in = False
+            player.location = ""
+            player.last_seen = datetime.now()
+            player.client_id = None
+            session.commit()
         return True
 
     def clean_name(self, name):
@@ -492,39 +541,10 @@ class PlayerManager(SimpleCommandPlugin):
         :param reason: String. Reason for rejection.
         :return: Rejection packet.
         """
+
         return build_packet(packets["connect_failure"],
                             ConnectFailure.build(
                                 dict(reason=reason)))
-
-    def sync(self):
-        """
-        Shelf sync function. Ensure storage shelf contains necessary sections.
-
-        :return: Null
-        """
-        if "players" not in self.shelf:
-            self.shelf["players"] = {}
-        if "plugins" not in self.shelf:
-            self.shelf["plugins"] = {}
-        if "planets" not in self.shelf:
-            self.shelf["planets"] = {}
-        if "bans" not in self.shelf:
-            self.shelf["bans"] = {}
-        if "ships" not in self.shelf:
-            self.shelf["ships"] = {}
-        self.shelf.sync()
-
-    def deactivate(self):
-        """
-        Deactivate the shelf.
-
-        :return: Null
-        """
-        for player in self.shelf["players"].values():
-            player.connection = None
-            player.logged_in = False
-        self.shelf.close()
-        self.logger.debug("Closed the shelf")
 
     def _rebuild_ranks(self, ranks):
         """
@@ -533,6 +553,7 @@ class PlayerManager(SimpleCommandPlugin):
         :param ranks: The initial rank config.
         :return: Dict: The built rank permissions.
         """
+
         final = {}
 
         def build_inherits(inherits):
@@ -561,8 +582,12 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection: Connection of target player to be banned.
         :return: Null
         """
-        ban = IPBan(ip, reason, connection.player.alias)
-        self.shelf["bans"][ip] = ban
+
+        with db_session(self.session) as session:
+            ban = IPBan(ip=ip, reason=reason, banned_at=datetime.now(),
+                        banned_by=connection.player.alias)
+            session.add(ban)
+            session.commit()
         send_message(connection,
                      "Banned IP: {} with reason: {}".format(ip, reason))
 
@@ -575,8 +600,11 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection: Connection of target player to be unbanned.
         :return: Null
         """
-        # ban = IPBan(ip, reason, connection.player.alias)
-        del self.shelf["bans"][ip]
+
+        with db_session(self.session) as session:
+            ban = session.query(IPBan).filter_by(ip=ip).first()
+            session.delete(ban)
+            session.commit()
         send_message(connection,
                      "Ban removed: {}".format(ip))
 
@@ -591,6 +619,7 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection: Connection of target player to be banned.
         :return: Null
         """
+
         p = self.find_player(name)
         if p is not None:
             self.ban_by_ip(p.ip, reason, connection)
@@ -608,6 +637,7 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection: Connection of target player to be banned.
         :return: Null
         """
+
         p = self.find_player(name)
         if p is not None:
             self.unban_by_ip(p.ip, connection)
@@ -624,49 +654,44 @@ class PlayerManager(SimpleCommandPlugin):
         :raise: ValueError if player is banned. Pass reason message up with
                 exception.
         """
-        if connection.client_ip in self.shelf["bans"]:
-            self.logger.info("Banned IP ({}) tried to log in.".format(
-                connection.client_ip))
-            raise ValueError("You are banned!\nReason: {}".format(
-                self.shelf["bans"][connection.client_ip].reason))
 
-    def check_species(self, player):
+        with db_session(self.session) as session:
+            ban = session.query(IPBan).filter_by(
+                ip=connection.client_ip).first()
+            if ban:
+                self.logger.info("Banned IP ({}) tried to log in.".format(
+                    connection.client_ip))
+                raise ValueError("You are banned!\nReason: {}".format(
+                    ban.reason))
+
+    def check_species(self, species):
         """
         Check if a player has an unknown species. Raise ValueError when true.
         Context: http://community.playstarbound.com/threads/119569/
 
-        :param player: The player to check.
+        :param species: The species of the player being checked.
         :return: Null.
         :raise: ValueError if the player has an unknown species.
         """
-        if player.species not in self.plugin_config.allowed_species:
-            self.logger.info("Player with unknown species ({}) tried to log in.".format(
-                player.species))
-            raise ValueError("Connection terminated!\nYour species ({}) is not allowed.".format(
-                player.species))
 
-    def get_storage(self, caller):
-        """
-        Collect the storage for caller.
+        if species not in self.plugin_config.allowed_species:
+            self.logger.info("Player with unknown species ({}) tried to log in."
+                             "".format(species))
+            raise ValueError("Connection terminated!\nThe species ({}) is not "
+                             "allowed on this server.".format(species))
 
-        :param caller: Entity requesting its storage
-        :return: Storage shelf for caller. If called doesn't have anything in
-                 storage, return an empty shelf.
-        """
-        name = caller.name
-        if name not in self.plugin_shelf:
-            self.plugin_shelf[name] = DotDict({})
-        return self.plugin_shelf[name]
-
-    def get_player_by_uuid(self, uuid):
+    def get_player_by_uuid(self, uuid) -> Player:
         """
         Grab a hook to a player by their uuid. Returns player object.
 
         :param uuid: String: UUID of player to check.
         :return: Mixed: Player object.
         """
-        if uuid in self.shelf["players"]:
-            return self.shelf["players"][uuid]
+
+        with db_session(self.session) as session:
+            player = session.query(Player).filter(
+                Player.uuid.ilike(uuid)).first()
+        return cache_query(player)
 
     def get_player_by_name(self, name, check_logged_in=False) -> Player:
         """
@@ -678,11 +703,13 @@ class PlayerManager(SimpleCommandPlugin):
                                 (true), or the player's server object (false).
         :return: Mixed: Boolean on logged_in check, player object otherwise.
         """
+
         lname = name.lower()
-        for player in self.shelf["players"].values():
-            if player.name.lower() == lname:
-                if not check_logged_in or player.logged_in:
-                    return player
+        with db_session(self.session) as session:
+            player = session.query(Player).filter(
+                Player.name.ilike(lname)).first()
+            if not check_logged_in or player.logged_in:
+                return cache_query(player)
 
     def get_player_by_alias(self, alias, check_logged_in=False) -> Player:
         """
@@ -694,22 +721,27 @@ class PlayerManager(SimpleCommandPlugin):
                                 (true), or the player's server object (false).
         :return: Mixed: Boolean on logged_in check, player object otherwise.
         """
-        lname = alias.lower()
-        for player in self.shelf["players"].values():
-            if player.alias.lower() == lname:
-                if not check_logged_in or player.logged_in:
-                    return player
 
-    def get_player_by_client_id(self, id) -> Player:
+        lname = alias.lower()
+        with db_session(self.session) as session:
+            player = session.query(Player).filter(
+                Player.alias.ilike(lname)).first()
+            if not check_logged_in or player.logged_in:
+                return cache_query(player)
+
+    def get_player_by_client_id(self, client_id) -> Player:
         """
         Grab a hook to a player by their client id. Returns player object.
 
-        :param id: Integer: Client Id of the player to check.
+        :param client_id: Integer: Client Id of the player to check.
         :return: Player object.
         """
-        for player in self.shelf["players"].values():
-            if player.client_id == id and player.logged_in:
-                return player
+
+        with db_session(self.session) as session:
+            player = session.query(Player).filter_by(
+                client_id=client_id).first()
+            if player.client_id:
+                return cache_query(player)
 
     def get_player_by_ip(self, ip, check_logged_in=False) -> Player:
         """
@@ -721,12 +753,24 @@ class PlayerManager(SimpleCommandPlugin):
                                 (true), or the player's server object (false)
         :return: Mixed: Boolean on logged_in check, player object otherwise.
         """
-        for player in self.shelf["players"].values():
-            if player.ip == ip:
+
+        with db_session(self.session) as session:
+            player = session.query(Player).filter_by(current_ip=ip).all()
+            if player:
+                if len(player) > 1:
+                    raise ValueError("Multiple clients logged in from same IP.")
+
                 if not check_logged_in or player.logged_in:
                     return player
 
-    def find_player(self, search, check_logged_in=False):
+    def get_connection(self, current_connection, player):
+        for c in current_connection.factory.connections:
+            if player.uuid == c.player.uuid:
+                return c
+        else:
+            return False
+
+    def find_player(self, search, check_logged_in=False) -> Player:
         """
         Convenience method to try and find a player by a variety of methods.
         Checks for alias, then raw name, then client id.
@@ -735,12 +779,15 @@ class PlayerManager(SimpleCommandPlugin):
         :param check_logged_in: Boolean: Return the login status only if true.
         :return: Mixed: Boolean on logged_in check, player object otherwise.
         """
+
         player = self.get_player_by_alias(search, check_logged_in)
         if player is not None:
             return player
+
         player = self.get_player_by_name(search, check_logged_in)
         if player is not None:
             return player
+
         try:
             search = int(search)
             player = self.get_player_by_client_id(search)
@@ -748,19 +795,19 @@ class PlayerManager(SimpleCommandPlugin):
                 return player
         except ValueError:
             pass
+
         if len(search) == 32:
             player = self.get_player_by_uuid(search)
             if player is not None:
                 return player
+
         player = self.get_player_by_ip(search, check_logged_in)
         if player is not None:
             return player
 
     @asyncio.coroutine
-    def _add_or_get_player(self, uuid, species, name="", last_seen=None,
-                           ranks=None, logged_in=False, connection=None,
-                           client_id=-1, ip="", planet="", muted=False,
-                           **kwargs) -> Player:
+    def _add_or_get_player(self, uuid, species, name="",
+                           ip="", **kwargs) -> Player:
         """
         Given a UUID, try to find the player's info in storage. In the event
         that the player has never connected to the server before, add their
@@ -769,14 +816,8 @@ class PlayerManager(SimpleCommandPlugin):
         :param uuid: UUID of connecting character
         :param species: Species of connecting character
         :param name: Name of connecting character
-        :param last_seen: Date of last login
         :param roles: Roles granted to character
-        :param logged_in: Boolean: Is character currently logged in
-        :param connection: Connection of connecting player
-        :param client_id: ID for connection given by server
         :param ip: IP address of connection
-        :param planet: Current planet character is on/near
-        :param muted: Boolean: Is the player currently muted
         :param kwargs: any other keyword arguments
         :return: Player object.
         """
@@ -789,116 +830,155 @@ class PlayerManager(SimpleCommandPlugin):
         if alias is None:
             alias = uuid[0:4]
 
-        if uuid in self.shelf["players"]:
-            self.logger.info("Known player is attempting to log in: "
-                             "{}".format(alias))
-            p = self.shelf["players"][uuid]
-            if p.logged_in:
-                raise ValueError("Player is already logged in.")
-            if not hasattr(p, "species"):
-                p.species = species
-            elif p.species != species:
-                p.species = species
-            if p.name != name:
-                p.name = name
-                alias = self.clean_name(name)
-                if self.get_player_by_alias(alias) or alias is None:
-                    alias = uuid[0:4]
-                p.alias = alias
-            p.update_ranks(self.ranks)
-            return p
-        else:
-            if self.get_player_by_alias(alias) is not None:
-                raise NameError("A user with that name already exists.")
-            self.logger.info("Adding new player to database: {} (UUID:{})"
-                             "".format(alias, uuid))
-            if uuid == self.plugin_config.owner_uuid:
-                ranks = set(self.plugin_config.owner_ranks)
+        with db_session(self.session) as session:
+            ip_addr = session.query(IP).filter_by(ip=ip, uuid=uuid).first()
+            if not ip_addr:
+                ip_addr = IP(ip=ip, uuid=uuid, last_seen=datetime.now())
+                session.add(ip_addr)
             else:
-                ranks = set(self.plugin_config.new_user_ranks)
-            new_player = Player(uuid, species, name, alias, last_seen,
-                                ranks, logged_in, connection, client_id, ip,
-                                planet, muted)
-            new_player.update_ranks(self.ranks)
-            self.shelf["players"][uuid] = new_player
-            return new_player
+                ip_addr.last_seen = datetime.now()
+            session.commit()
+
+        with db_session(self.session) as session:
+            player = session.query(Player).filter_by(uuid=uuid).first()
+            if player:
+                self.logger.info("Known player is attempting to log in: "
+                                 "{} (UUID: {})".format(alias, uuid))
+                if player.logged_in:
+                    raise ValueError("Player is already logged in.")
+                if player.name != name:
+                    player.name = name
+                player.alias = alias
+                player.current_ip = ip
+                player.update_ranks(player, self.server_ranks)
+            else:
+                self.logger.info("A new player is connecting")
+                if self.get_player_by_alias(alias) is not None:
+                    raise NameError("A user with that name already exists.")
+                self.logger.info("Adding new player to database: {} (UUID: {})"
+                                 "".format(alias, uuid))
+                if uuid == self.plugin_config.owner_uuid:
+                    ranks = set(self.plugin_config.owner_ranks)
+                else:
+                    ranks = set(self.plugin_config.new_user_ranks)
+                player = Player(uuid=uuid,
+                                name=name,
+                                alias=alias,
+                                species=species,
+                                current_ip=ip,
+                                first_seen=datetime.now(),
+                                ranks=pack(ranks),
+                                logged_in=False)
+                session.add(player)
+                player.update_ranks(player, self.server_ranks)
+            session.commit()
+            return cache_query(player)
 
     @asyncio.coroutine
-    def _add_or_get_ship(self, uuid):
+    def _add_or_get_ship(self, ship_id) -> Ship:
         """
         Given a ship world's uuid, look up their ship in the ships shelf. If
         ship not in shelf, add it. Return a Ship object.
 
-        :param uuid: Target player to look up
+        :param ship_id: Target player to look up
         :return: Ship object.
         """
-        def _get_player_name(uid):
-            player = ""
-            if isinstance(uid, bytes):
-                uid = uid.decode("utf-8")
-            for p in self.factory.connections:
-                if p.player.uuid == uid:
-                    player = p.player.alias
-                    return player
 
-        if uuid in self.shelf["ships"]:
-            return self.shelf["ships"][uuid]
-        else:
-            ship = Ship(uuid, _get_player_name(uuid))
-            self.shelf["ships"][uuid] = ship
-            return ship
+        p = self.get_player_by_uuid(ship_id)
+        if p:
+            with db_session(self.session) as session:
+                ship = session.query(Ship).filter_by(uuid=p.uuid).first()
+                if not ship:
+                    ship = Ship(p.uuid, p.alias)
+                    session.add(ship)
+                session.commit()
+
+                return cache_query(ship)
 
     @asyncio.coroutine
-    def _add_or_get_planet(self, location, planet, satellite) -> Planet:
+    def _add_or_get_planet(self, x=0, y=0, z=0, orbit=0, satellite=0,
+                           name="") -> Planet:
         """
         Look up a planet in the planets shelf, return a Planet object. If not
         present, add it to the shelf. Return a Planet object.
 
-        :param location:
-        :param planet:
-        :param satellite:
         :return: Planet object.
         """
-        # TODO: add planet names to this, since people seem to like using
-        # those as a way to refer to the planets as well.
-        a, x, y = location
-        loc_string = "{}:{}:{}:{}:{}".format(a, x, y, planet, satellite)
-        if loc_string in self.shelf["planets"]:
-            self.logger.info("Returning to an already logged planet.")
-            planet = self.shelf["planets"][loc_string]
-        else:
-            self.logger.info("Logging new planet to database.")
-            planet = Planet(location=location, planet=planet,
-                            satellite=satellite)
-            self.shelf["planets"][str(planet)] = planet
-            self.junk = State
-        return planet
+
+        location = Planet.location_string(x, y, z, orbit, satellite)
+
+        with db_session(self.session) as session:
+            planet = session.query(Planet).filter_by(location=location).first()
+            if not planet:
+                self.logger.info("Logging new planet in database.")
+                planet = Planet(x=x, y=y, z=z, orbit=orbit, satellite=satellite,
+                                name=name)
+                session.add(planet)
+            session.commit()
+
+            return cache_query(planet)
 
     @asyncio.coroutine
     def _add_or_get_instance(self, data):
         """
-        Look up a planet in the planets shelf, return a Planet object. If not
-        present, add it to the shelf. Return a Planet object.
+        Generate instance string. Since these volatile, we don't actually
+        store them, contrary to the 'add' used in naming the method.
 
         :param data:
-        :return: Instance object.
+        :return: String.
         """
-        instance_string = list("InstanceWorld:")
-        instance_string.append("{}".format(data["world_name"]))
-        if data["is_instance"]:
-            instance_string.append(":{}".format(data["instance_id"].decode(
-                "utf-8")))
-        else:
-            instance_string.append(":-")
 
-        return "".join(instance_string)
+        instance = list("InstanceWorld:")
+        instance.append("{}".format(data["world_name"]))
+        if data["is_instance"]:
+            instance.append(":{}".format(data["instance_id"].decode("utf-8")))
+        else:
+            instance.append(":-")
+
+        return "".join(instance)
+
+    def players_online(self, connection=None):
+        """
+        Check which players are logged in.
+
+        If a connection is provided, determine online players from the
+        connection queue stored in the factory. Otherwise, check the
+        database fro all 'online' players (default).
+
+        :param connection: Hook for connection factory (optional).
+        :return list: List of players online.
+        """
+
+        if connection:
+            players = list()
+            for c in connection.factory.connections:
+                players.append(c.player)
+            return players
+        else:
+            with db_session(self.session) as session:
+                players = session.query(Player).filter_by(logged_in=True).all()
+                return cache_query(players, collection=True)
+
+    def players_here(self, location):
+        """
+        Check which players are at a location.
+
+        :param location:
+        :return:
+        """
+
+        with db_session(self.session) as session:
+            players = session.query(Player).filter_by(logged_in=True,
+                                                      location=location).all()
+            return cache_query(players, collection=True)
 
     # Commands - In-game actions that can be performed
 
     @Command("kick",
              perm="player_manager.kick",
              doc="Kicks a player.",
-             syntax=("[\"]player name[\"]", "[reason]"))
+             syntax=("[\"]player name[\"]", "[reason]",
+                     "[*dirty] ^red;dirty disconnect crashes target.^reset;"))
     def _kick(self, data, connection):
         """
         Kick a play off the server. You must specify a name. You may also
@@ -909,8 +989,12 @@ class PlayerManager(SimpleCommandPlugin):
         :return: Null.
         """
 
-        # FIXME: Kick is currently broken. Kicking someone will cause their
-        # starbound client to crash (overkill).
+        if data[-1] == "*dirty":
+            dirty = True
+            data.pop()
+        else:
+            dirty = False
+
         try:
             alias = data[0]
         except IndexError:
@@ -934,23 +1018,34 @@ class PlayerManager(SimpleCommandPlugin):
             send_message(connection,
                          "Player {} is not currently logged in.".format(alias))
             return
-        if p.client_id == -1 or p.connection is None:
-            p.connection = None
-            p.logged_in = False
-            p.location = None
-            self.players_online.remove(p.uuid)
-            return
-        kick_string = "You were kicked.\n Reason: {}".format(reason)
+
+        target = self.get_connection(connection, p)
+        if not target:
+            # player not in connection pool
+            with db_session(self.session) as session:
+                player = session.query(Player).filter_by(uuid=p.uuid).first()
+                player.logged_in = False
+                player.location = ""
+                player.client_id = None
+                session.commit()
+                send_message(connection, "Kicking offline player {}".format(
+                    p.alias))
+                self.logger.warning("Kicking offline player.")
+                return
+
+        if not dirty:
+            worldstop_packet = build_packet(packets["world_stop"],
+                                            WorldStop.build(
+                                                dict(reason="Removed")))
+            yield from target.raw_write(worldstop_packet)
+        kick_string = "You were kicked.\n Reason: ^red;{}^reset;".format(reason)
         kick_packet = build_packet(packets["server_disconnect"],
                                    ServerDisconnect.build(
                                        dict(reason=kick_string)))
-        yield from p.connection.raw_write(kick_packet)
-        p.connection = None
-        p.logged_in = False
-        p.location = None
-        self.players_online.remove(p.uuid)
+        yield from target.raw_write(kick_packet)
         broadcast(self, "^red;{} has been kicked for reason: "
                         "{}^reset;".format(alias, reason))
+        yield from self._set_offline(target)
 
     @Command("ban",
              perm="player_manager.ban",
@@ -971,6 +1066,7 @@ class PlayerManager(SimpleCommandPlugin):
         :return: Null.
         :raise: SyntaxWarning on incorrect input.
         """
+
         try:
             target, reason = data[0], " ".join(data[1:])
             if self.find_player(target).priority >= connection.player.priority:
@@ -988,7 +1084,7 @@ class PlayerManager(SimpleCommandPlugin):
     @Command("unban",
              perm="player_manager.ban",
              doc="Unbans a user or an IP address.",
-             syntax=("(ip | name)"))
+             syntax="(ip | name)")
     def _unban(self, data, connection):
         """
         Unban a player. You must specify either a name or an IP.
@@ -998,6 +1094,7 @@ class PlayerManager(SimpleCommandPlugin):
         :return: Null.
         :raise: SyntaxWarning on incorrect input.
         """
+
         try:
             target = data[0]
             if re.match(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$", target):
@@ -1018,20 +1115,78 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
-        if len(self.shelf["bans"].keys()) == 0:
-            send_message(connection, "There are no active bans.")
-        else:
+
+        with db_session(self.session) as session:
+            bans = session.query(IPBan).all()
+            if not bans:
+                send_message(connection, "There are no active bans.")
+                return
+
             res = ["Active bans:"]
-            for ban in self.shelf["bans"].values():
+            for ban in bans:
                 res.append("IP: {ip} - "
                            "Reason: {reason} - "
-                           "Banned by: {banned_by}".format(**ban.__dict__))
+                           "Banned by: {banned_by} - "
+                           "Banned at: {banned_at}".format(**ban.__dict__))
             send_message(connection, "\n".join(res))
 
     @Command("user",
              perm="player_manager.user",
              doc="Manages user permissions; see /user help for details.")
     def _user(self, data, connection):
+        @asyncio.coroutine
+        def _send_lack_permission(conn):
+            yield from send_message(conn,
+                                    "You don't have permission to do that!")
+
+        @asyncio.coroutine
+        def _send_user_not_found(conn, user):
+            yield from send_message(conn, "User {} not found.".format(user))
+
+        @asyncio.coroutine
+        def _send_does_not_exit(conn, metathing, thing):
+            yield from send_message(conn, "{} {} does not exist."
+                                    .format(metathing, thing))
+
+        @asyncio.coroutine
+        def _send_not_specified(conn, metathing):
+            yield from send_message(conn, "No {} specified.".format(metathing))
+
+        @asyncio.coroutine
+        def _send_list(conn, metathing, user, things):
+            yield from send_message(conn, "{} for user {}:\n{}"
+                                    .format(metathing, user, things))
+
+        @asyncio.coroutine
+        def _send_already_has(conn, metathing, user, thing):
+            yield from send_message(conn, "Player {} already has {} {}."
+                                    .format(user, metathing, thing))
+
+        @asyncio.coroutine
+        def _send_does_not_have(conn, metathing, user, thing):
+            yield from send_message(conn, "Player {} does not have {} {}."
+                                    .format(user, metathing, thing))
+
+        @asyncio.coroutine
+        def _send_granted(conn, metathing, thing, user):
+            yield from send_message(conn, "You were granted {} {} by {}."
+                                    .format(metathing, thing, user))
+
+        @asyncio.coroutine
+        def _send_revoked(conn, metathing, thing, user):
+            yield from send_message(conn, "{} removed {} {} from you."
+                                    .format(user, metathing, thing))
+
+        @asyncio.coroutine
+        def _send_log_action(conn, action, metathing, thing, user):
+            direction = "from"
+            if action is "Granted":
+                direction = "to"
+            blurb = "{} {} {} {} {}.".format(action, metathing, thing,
+                                             direction, user)
+            self.logger.debug(blurb)
+            yield from send_message(conn, blurb)
+
         if not data:
             yield from send_message(connection, "No arguments provided. See "
                                                 "/user help for usage info.")
@@ -1058,154 +1213,146 @@ class PlayerManager(SimpleCommandPlugin):
             send_message(connection, "/user listranks (player)")
             send_message(connection, "Lists the ranks a player has.")
         elif data[0].lower() == "addperm":
-            target = self.find_player(data[1])
-            if target:
+            p = self.find_player(data[1])
+            if p:
                 if not data[2]:
-                    yield from send_message(connection, "No permission "
-                                                        "specified.")
+                    yield from _send_not_specified(connection, "permission")
                 elif not connection.player.perm_check(data[2]):
-                    yield from send_message(connection, "You don't have "
-                                            "permission to do that!")
-                elif data[2].lower() in target.permissions:
-                    yield from send_message(connection, "Player {} already "
-                                                        "has permission {}."
-                                            .format(target.alias, data[2]))
+                    yield from _send_lack_permission(connection)
+                elif data[2].lower() in unpack(p.permissions):
+                    yield from _send_already_has(connection, "permission",
+                                                 p.alias, data[2])
                 else:
-                    target.revoked_perms.discard(data[2].lower())
-                    target.granted_perms.add(data[2].lower())
-                    target.update_ranks(self.ranks)
-                    if target.logged_in:
-                        yield from send_message(target.connection,
-                                                "You were granted permission "
-                                                "{} by {}."
-                                                .format(data[2].lower(),
-                                                        connection.player.alias))
-                    yield from send_message(connection, "Granted permission "
-                                                        "{} to {}."
-                                            .format(data[2], target.alias))
+                    with db_session(self.session) as session:
+                        tmp = unpack(p.granted_perms)
+                        tmp.add(data[2].lower())
+                        p.granted_perms = pack(tmp)
+
+                        tmp = unpack(p.revoked_perms)
+                        tmp.discard(data[2].lower())
+                        p.revoked_perms = pack(tmp)
+
+                        p.update_ranks(p, self.server_ranks)
+                        session.commit()
+                    if p.logged_in:
+                        target = self.get_connection(connection, p)
+                        yield from _send_granted(target, "permission", 
+                                                 data[2].lower(),
+                                                 connection.player.alias)
+                    yield from _send_log_action(connection, "Granted", 
+                                                "permission", data[2], p.alias)
             else:
-                yield from send_message(connection, "User {} not "
-                                                    "found.".format(data[1]))
+                yield from _send_user_not_found(connection, data[1])
         elif data[0].lower() == "rmperm":
-            target = self.find_player(data[1])
-            if target:
+            p = self.find_player(data[1])
+            if p:
                 if not data[2]:
-                    yield from send_message(connection, "No permission "
-                                                        "specified.")
+                    yield from _send_not_specified(connection, "permission")
                 elif not connection.player.perm_check(data[2]):
-                    yield from send_message(connection, "You don't have "
-                                            "permission to do that!")
-                elif target.priority >= connection.player.priority:
-                    yield from send_message(connection, "You don't have "
-                                            "permission to do that!")
-                elif data[2].lower() not in target.permissions:
-                    yield from send_message(connection, "Player {} does not "
-                                                        "have permission {}."
-                                            .format(target.alias, data[2]))
+                    yield from _send_lack_permission(connection)
+                elif p.priority >= connection.player.priority:
+                    yield from _send_lack_permission(connection)
+                elif data[2].lower() not in unpack(p.permissions):
+                    yield from _send_does_not_have(connection, "permission", 
+                                                   p.alias, data[2])
                 else:
-                    target.granted_perms.discard(data[2].lower())
-                    target.revoked_perms.add(data[2].lower())
-                    target.update_ranks(self.ranks)
-                    if target.logged_in:
-                        yield from send_message(target.connection,
-                                                "{} removed permission {} "
-                                                "from you."
-                                                .format(connection.player.alias,
-                                                        data[2].lower()))
-                    yield from send_message(connection, "Removed permission "
-                                                        "{} from {}."
-                                            .format(data[2], target.alias))
+                    with db_session(self.session) as session:
+                        tmp = unpack(p.granted_perms)
+                        tmp.discard(data[2].lower())
+                        p.granted_perms = pack(tmp)
+
+                        tmp = unpack(p.revoked_perms)
+                        tmp.add(data[2].lower())
+                        p.revoked_perms = pack(tmp)
+
+                        p.update_ranks(p, self.server_ranks)
+                        session.commit()
+                    if p.logged_in:
+                        target = self.get_connection(connection, p)
+                        yield from _send_revoked(target, "permission", 
+                                                 data[2].lower(),
+                                                 connection.player.alias)
+                    yield from _send_log_action(connection, "Removed", 
+                                                "permission", data[2], p.alias)
             else:
-                yield from send_message(connection, "User {} not "
-                                                    "found.".format(data[1]))
+                yield from _send_user_not_found(connection, data[1])
         elif data[0].lower() == "addrank":
-            target = self.find_player(data[1])
-            if target:
+            p = self.find_player(data[1])
+            if p:
                 if not data[2]:
-                    send_message(connection, "No rank specified.")
+                    yield from _send_not_specified(connection, "rank")
                     return
-                if data[2] not in self.ranks:
-                    send_message(connection, "Rank {} does not exist."
-                                 .format(data[2]))
+                if data[2] not in self.server_ranks:
+                    yield from _send_does_not_exit(connection, "Rank", data[2])
                     return
-                rank = self.ranks[data[2]]
+                rank = self.server_ranks[data[2]]
                 if rank["priority"] >= connection.player.priority:
-                    yield from send_message(connection, "You don't have "
-                                            "permission to do that!")
-                elif data[2] in target.ranks:
-                    yield from send_message(connection, "Player {} already "
-                                                        "has rank {}."
-                                            .format(target.alias, data[2]))
+                    yield from _send_lack_permission(connection)
+                elif data[2] in unpack(p.ranks):
+                    yield from _send_already_has(connection, "rank", p.alias, 
+                                                 data[2])
                 else:
-                    target.ranks.add(data[2])
-                    target.update_ranks(self.ranks)
-                    if target.logged_in:
-                        yield from send_message(target.connection,
-                                                "You were granted rank {} by {}."
-                                                .format(data[2],
-                                                        connection.player.alias))
-                    yield from send_message(connection, "Granted rank "
-                                                        "{} to {}."
-                                            .format(data[2], target.alias))
+                    with db_session(self.session) as session:
+                        tmp = unpack(p.ranks)
+                        tmp.add(data[2])
+                        p.ranks = pack(tmp)
+                        p.update_ranks(p, self.server_ranks)
+                        session.commit()
+                    if p.logged_in:
+                        target = self.get_connection(connection, p)
+                        yield from _send_granted(target, "rank", data[2],
+                                                 connection.player.alias)
+                    yield from _send_log_action(connection, "Granted", "rank",
+                                                data[2], p.alias)
             else:
-                yield from send_message(connection, "User {} not "
-                                                    "found.".format(data[1]))
+                yield from _send_user_not_found(connection, data[1])
         elif data[0].lower() == "rmrank":
-            target = self.find_player(data[1])
-            if target:
+            p = self.find_player(data[1])
+            if p:
                 if not data[2]:
-                    send_message(connection, "No rank specified.")
+                    yield from _send_not_specified(connection, "rank")
                     return
-                if data[2] not in self.ranks:
-                    send_message(connection, "Rank {} does not exist."
-                                 .format(data[2]))
+                if data[2] not in self.server_ranks:
+                    yield from _send_does_not_exit(connection, "Rank", data[2])
                     return
-                if target.priority >= connection.player.priority:
-                    yield from send_message(connection, "You don't have "
-                                            "permission to do that!")
-                elif data[2] not in target.ranks:
-                    yield from send_message(connection, "Player {} does not "
-                                                        "have rank {}."
-                                            .format(target.alias, data[2]))
+                if p.priority >= connection.player.priority:
+                    yield from _send_lack_permission(connection)
+                elif data[2] not in unpack(p.ranks):
+                    yield from _send_does_not_have(connection, "rank", p.alias, 
+                                                   data[2])
                 else:
-                    target.ranks.remove(data[2])
-                    target.update_ranks(self.ranks)
-                    if target.logged_in:
-                        yield from send_message(target.connection, "{} removed"
-                                                                   " rank {} "
-                                                                   "from you."
-                                                .format(connection.player.alias,
-                                                        data[2]))
-                    yield from send_message(connection, "Removed rank "
-                                                        "{} from {}."
-                                            .format(data[2], target.alias))
+                    with db_session(self.session) as session:
+                        tmp = unpack(p.ranks)
+                        tmp.remove(data[2])
+                        p.ranks = pack(tmp)
+                        p.update_ranks(p, self.server_ranks)
+                        session.commit()
+                    if p.logged_in:
+                        target = self.get_connection(connection, p)
+                        yield from _send_revoked(target, "rank", data[2],
+                                                 connection.player.alias)
+                    yield from _send_log_action(connection, "Removed", "rank",
+                                                data[2], p.alias)
             else:
-                yield from send_message(connection, "User {} not "
-                                                    "found.".format(data[1]))
+                yield from _send_user_not_found(connection, data[1])
         elif data[0].lower() == "listperms":
-            target = self.find_player(data[1])
-            if target:
-                perms = ", ".join(target.permissions)
-                yield from send_message(connection, "Permissions for user {}:"
-                                                    "\n{}"
-                                        .format(target.alias, perms))
+            p = self.find_player(data[1])
+            if p:
+                perms = ", ".join(unpack(p.permissions))
+                yield from _send_list(connection, "Permissions", p.alias, perms)
             else:
-                yield from send_message(connection, "User {} not "
-                                                    "found.".format(data[1]))
+                yield from _send_user_not_found(connection, data[1])
         elif data[0].lower() == "listranks":
-            target = self.find_player(data[1])
-            if target:
-                ranks = ", ".join(target.ranks)
-                yield from send_message(connection, "Ranks for user {}:"
-                                                    "\n{}"
-                                        .format(target.alias, ranks))
+            p = self.find_player(data[1])
+            if p:
+                ranks = ", ".join(p.ranks.split(","))
+                yield from _send_list(connection, "Ranks", p.alias, ranks)
             else:
-                yield from send_message(connection, "User {} not "
-                                                    "found.".format(data[1]))
+                yield from _send_user_not_found(connection, data[1])
         else:
-            yield from send_message(connection, "Argument not recognized. "
-                                                "See /user help for usage "
-                                                "info.")
+            yield from send_message(connection, 
+                                    "Argument not recognized. See /user "
+                                    "help for usage info.")
 
     @Command("list_players",
              perm="player_manager.list_players",
@@ -1221,18 +1368,19 @@ class PlayerManager(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
-        players = [player for player in self.players.values()]
-        players.sort(key=attrgetter("name"))
-        send_message(connection,
-                     "{} players found:".format(len(players)))
-        for x, player in enumerate(players):
-            player_info = "  {0}. {1}{2}"
-            if player.logged_in:
-                l = " (logged-in, ID: {})".format(player.client_id)
-            else:
-                l = ""
-            send_message(connection, player_info.format(x + 1, player.alias,
-                                                        l))
+
+        with db_session(self.session) as session:
+            players = session.query(Player).order_by(Player.alias).all()
+            send_message(connection,
+                         "{} players found:".format(len(players)))
+            for x, player in enumerate(players):
+                player_info = "  {0}. {1}{2}"
+                if player.logged_in:
+                    l = " (logged-in, ID: {})".format(player.client_id)
+                else:
+                    l = ""
+                send_message(connection, player_info.format(x + 1, player.alias,
+                                                            l))
 
     @Command("del_player",
              perm="player_manager.delete_player",
@@ -1252,6 +1400,7 @@ class PlayerManager(SimpleCommandPlugin):
         :raise: NameError if is not available. ValueError if player is
                 currently logged in.
         """
+
         if not data:
             send_message(connection, "No arguments provided.")
             return
@@ -1273,6 +1422,7 @@ class PlayerManager(SimpleCommandPlugin):
             raise ValueError(
                 "Can't delete a logged-in player; please kick them first. If "
                 "absolutely necessary, append *force to the command.")
-        self.players.pop(player.uuid)
-        del player
+        with db_session(self.session) as session:
+            session.delete(player.record)
+            session.commit()
         send_message(connection, "Player {} has been deleted.".format(alias))

@@ -8,7 +8,7 @@ Ported by: kharidiron
 
 import asyncio
 
-from base_plugin import SimpleCommandPlugin
+from plugin_manager import SimpleCommandPlugin
 from utilities import Command, send_message
 
 
@@ -42,6 +42,7 @@ class MOTD(SimpleCommandPlugin):
         :return: Boolean: True. Anything else stops the client from being able
                  to connect.
         """
+
         asyncio.ensure_future(self._display_motd(connection))
         return True
 
@@ -57,6 +58,7 @@ class MOTD(SimpleCommandPlugin):
         :param connection: The connection we're showing the message to.
         :return: Null.
         """
+
         yield from send_message(connection, "{}".format(self.motd))
         return
 
@@ -74,6 +76,7 @@ class MOTD(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Boolean. True if successful, False if failed.
         """
+
         if data:
             new_message = " ".join(data)
             self.motd = new_message
@@ -92,5 +95,6 @@ class MOTD(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
+
         asyncio.ensure_future(
             send_message(connection, "{}".format(self.motd)))

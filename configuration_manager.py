@@ -10,6 +10,7 @@ logger = logging.getLogger("starrypy.configuration_manager")
 
 class ConfigurationManager:
     def __init__(self):
+        logger.info("Loading configuration manager.")
         self._raw_config = None
         self._raw_default_config = None
         self._config = {}
@@ -26,6 +27,7 @@ class ConfigurationManager:
         return self._dot_dict
 
     def load_config(self, path, default=False):
+        logger.debug("Loading configuration.")
         if not isinstance(path, Path):
             path = Path(path)
         if default:

@@ -11,9 +11,9 @@ Add a number of chat commands that leverage the roles system:
 Original authors: medeor413
 """
 
-from base_plugin import SimpleCommandPlugin
-from utilities import Command, send_message, ChatReceiveMode, broadcast,\
-    link_plugin_if_available
+from plugin_manager import SimpleCommandPlugin
+from utilities import (Command, send_message, ChatReceiveMode, broadcast,
+                       link_plugin_if_available)
 
 
 class PrivilegedChatter(SimpleCommandPlugin):
@@ -61,21 +61,24 @@ class PrivilegedChatter(SimpleCommandPlugin):
         :param connection: The connection which sent the command.
         :return: Null.
         """
+
         if data:
             message = " ".join(data)
             if self.chat_enhancements:
-                sender = self.chat_enhancements.decorate_line(connection)
+                sender = self.chat_enhancements.decorate_line(connection.player)
             else:
-                sender = connection.player.name
+                sender = connection.player.alias
             send_mode = ChatReceiveMode.BROADCAST
             channel = ""
-            for uuid in self.plugins["player_manager"].players_online:
-                p = self.plugins["player_manager"].get_player_by_uuid(uuid)
-                if p.perm_check("privileged_chatter.modchat"):
-                    yield from send_message(p.connection,
+            for player in self.plugins.player_manager.players_online(
+                    connection):
+                target = self.plugins.player_manager.get_connection(connection,
+                                                                    player)
+                if player.perm_check("privileged_chatter.modchat"):
+                    yield from send_message(target,
                                             "{}{}^reset;".format(
                                                 self.modchat_color, message),
-                                            client_id=p.client_id,
+                                            client_id=player.client_id,
                                             name=sender,
                                             mode=send_mode,
                                             channel=channel)
@@ -92,12 +95,13 @@ class PrivilegedChatter(SimpleCommandPlugin):
         :param connection: The connection which sent the command.
         :return: Null.
         """
+
         if data:
             message = " ".join(data)
             if self.chat_enhancements:
-                sender = self.chat_enhancements.decorate_line(connection)
+                sender = self.chat_enhancements.decorate_line(connection.player)
             else:
-                sender = connection.player.name
+                sender = connection.player.alias
             send_mode = ChatReceiveMode.BROADCAST
             channel = ""
             mods_online = False
@@ -108,14 +112,16 @@ class PrivilegedChatter(SimpleCommandPlugin):
                                     name=sender,
                                     mode=send_mode,
                                     channel=channel)
-            for uuid in self.plugins["player_manager"].players_online:
-                p = self.plugins["player_manager"].get_player_by_uuid(uuid)
-                if p.perm_check("privileged_chatter.modchat"):
+            for player in self.plugins.player_manager.players_online(
+                    connection):
+                target = self.plugins.player_manager.get_connection(connection,
+                                                                    player)
+                if player.perm_check("privileged_chatter.modchat"):
                     mods_online = True
-                    yield from send_message(p.connection,
+                    yield from send_message(target,
                                             "{}{}^reset;".format(
                                                 self.report_prefix, message),
-                                            client_id=p.client_id,
+                                            client_id=player.client_id,
                                             name=sender,
                                             mode=send_mode,
                                             channel=channel)
@@ -140,6 +146,7 @@ class PrivilegedChatter(SimpleCommandPlugin):
         :param connection: The connection from which the packet came.
         :return: Null.
         """
+
         if data:
             message = self.broadcast_prefix + " ".join(data)
             broadcast(self, message)
